@@ -144,6 +144,14 @@ func TestDynamicOIDTranslation(t *testing.T) {
 		MibEngineMu.Unlock()
 	}()
 
+	// Skip if the MIB engine was not able to load the required MIB files
+	MibEngineMu.RLock()
+	engine := MibEngine
+	MibEngineMu.RUnlock()
+	if engine == nil || engine.Module("IF-MIB") == nil || engine.Module("IP-MIB") == nil || engine.Module("UCD-SNMP-MIB") == nil {
+		t.Skip("Skipping TestDynamicOIDTranslation: required SNMP MIB modules not loaded (IF-MIB, IP-MIB, UCD-SNMP-MIB)")
+	}
+
 	tests := []struct {
 		input    string
 		expected string

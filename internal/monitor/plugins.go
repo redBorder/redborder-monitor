@@ -155,7 +155,7 @@ func PingPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 
 	defaultErrVal := "100.0"
 	if strings.ToLower(metric) == "latency" || strings.ToLower(metric) == "rtt" {
-		defaultErrVal = "0.0"
+		defaultErrVal = "0.00"
 	}
 
 	if host == "" {
