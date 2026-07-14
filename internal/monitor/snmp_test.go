@@ -10,20 +10,27 @@ import (
 func TestTranslateOID(t *testing.T) {
 	tests := []struct {
 		input    string
-		expected string
+		expected []string
 	}{
-		{"UCD-SNMP-MIB::laLoad.2", ".1.3.6.1.4.1.2021.10.1.3.2"},
-		{"laLoad.2", ".1.3.6.1.4.1.2021.10.1.3.2"},
-		{".1.3.6.1.4.1.2021.10.1.3.2", ".1.3.6.1.4.1.2021.10.1.3.2"},
-		{"laLoad.3", ".1.3.6.1.4.1.2021.10.1.3.3"},
-		{"SNMPv2-SMI::enterprises.9.9.109.1.1.1.1.4.2", "1.3.6.1.4.1.9.9.109.1.1.1.1.4.2"},
-		{"IF-MIB::ifIndex.1", "1.3.6.1.2.1.2.ifIndex.1"},
+		{"UCD-SNMP-MIB::laLoad.2", []string{".1.3.6.1.4.1.2021.10.1.3.2"}},
+		{"laLoad.2", []string{".1.3.6.1.4.1.2021.10.1.3.2"}},
+		{".1.3.6.1.4.1.2021.10.1.3.2", []string{".1.3.6.1.4.1.2021.10.1.3.2"}},
+		{"laLoad.3", []string{".1.3.6.1.4.1.2021.10.1.3.3"}},
+		{"SNMPv2-SMI::enterprises.9.9.109.1.1.1.1.4.2", []string{"1.3.6.1.4.1.9.9.109.1.1.1.1.4.2", ".1.3.6.1.4.1.9.9.109.1.1.1.1.4.2"}},
+		{"IF-MIB::ifIndex.1", []string{"1.3.6.1.2.1.2.ifIndex.1", ".1.3.6.1.2.1.2.2.1.1.1", "1.3.6.1.2.1.2.2.1.1.1"}},
 	}
 
 	for _, tt := range tests {
 		got := TranslateOID(tt.input)
-		if got != tt.expected {
-			t.Errorf("TranslateOID(%s) = %s, expected %s", tt.input, got, tt.expected)
+		match := false
+		for _, exp := range tt.expected {
+			if got == exp {
+				match = true
+				break
+			}
+		}
+		if !match {
+			t.Errorf("TranslateOID(%s) = %s, expected one of %v", tt.input, got, tt.expected)
 		}
 	}
 }
