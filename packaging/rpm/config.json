@@ -1,0 +1,17 @@
+{
+  "conf": {
+    "debug": 3,  
+    "stdout": 1,
+    "syslog": 0,
+    "threads": 10,
+    "timeout": 40,
+    "max_snmp_fails": 2,
+    "sleep_main": 50,
+    "sleep_worker": 2,
+    "kafka_broker": "kafka.service",
+    "kafka_topic": "rb_monitor",  
+    "max_kafka_fails": 2,
+    "kafka_timeout": 2 
+  },
+  "sensors": []
+}

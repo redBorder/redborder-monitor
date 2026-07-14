@@ -1,0 +1,21 @@
+# Compiled binary
+/redborder-monitor
+
+# RPM mock build artifacts
+/packaging/rpm/SOURCES/
+/packaging/rpm/pkgs/
+
+# Build logs
+*.log
+/packaging/rpm/available_pkgs
+/packaging/rpm/installed_pkgs
+
+# Go testing coverage and test binaries
+*.test
+*.out
+cover.out
+
+# IDE configs
+.idea/
+.vscode/
+.DS_Store

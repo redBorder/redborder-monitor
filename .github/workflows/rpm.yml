@@ -1,0 +1,68 @@
+name: Test and Build RPM
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'main'
+  pull_request:
+    branches:
+      - 'master'
+      - 'main'
+
+jobs:
+  test:
+    name: Run Go Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+          cache: true
+
+      - name: Run Tests
+        run: go test -v ./...
+
+  build-rpm:
+    name: Build RPM (Rocky Linux 9)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Required for git describe versioning
+
+      - name: Run Rocky Linux 9 Builder
+        run: |
+          # 1. Run Rocky Linux 9 container mounting workspace
+          docker run --privileged -d --name builder -v ${{ github.workspace }}:/workspace rockylinux:9 sleep infinity
+          
+          # 2. Install build requirements
+          docker exec builder dnf install -y epel-release
+          docker exec builder dnf install -y rpm-build make git golang tar
+          
+          # 3. Build RPM using topdir mapped to workspace
+          docker exec builder bash -c "
+            cd /workspace/packaging/rpm
+            VERSION=\$(git describe --abbrev=6 --tags HEAD --always | sed 's/-/_/g')
+            echo 'Building version: '\$VERSION
+            make VERSION=\$VERSION SOURCES
+            make VERSION=\$VERSION archive
+            rpmbuild --define '__version '\$VERSION --define '__release 1' --define '_topdir /workspace/packaging/rpm' -ba /workspace/packaging/rpm/redborder-monitor.spec
+          "
+          
+          # 4. Clean up container
+          docker stop builder && docker rm builder
+
+      - name: Upload RPM Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: redborder-monitor-rpms
+          path: |
+            packaging/rpm/RPMS/x86_64/*.rpm
+            packaging/rpm/SRPMS/*.src.rpm
