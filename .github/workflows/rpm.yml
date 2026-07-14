@@ -48,6 +48,7 @@ jobs:
           
           # 3. Build RPM using topdir mapped to workspace
           docker exec builder bash -c "
+            git config --global --add safe.directory /workspace
             cd /workspace/packaging/rpm
             VERSION=\$(git describe --abbrev=6 --tags HEAD --always | sed 's/-/_/g')
             echo 'Building version: '\$VERSION
