@@ -102,7 +102,8 @@ func TestLoadConfigWithStringifiedIntegers(t *testing.T) {
 	configData := `{
 		"conf": {
 			"debug": "3",
-			"threads": "5"
+			"threads": "5",
+			"max_simultaneous_queries": "25"
 		},
 		"sensors": [
 			{
@@ -141,6 +142,9 @@ func TestLoadConfigWithStringifiedIntegers(t *testing.T) {
 	}
 	if config.Conf.Threads != 5 {
 		t.Errorf("Expected Threads=5, got %d", config.Conf.Threads)
+	}
+	if config.Conf.MaxSimultaneousQueries != 25 {
+		t.Errorf("Expected MaxSimultaneousQueries=25, got %d", config.Conf.MaxSimultaneousQueries)
 	}
 	if config.Sensors[0].Timeout != 1000 {
 		t.Errorf("Expected sensor timeout=1000, got %d", config.Sensors[0].Timeout)

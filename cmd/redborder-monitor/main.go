@@ -121,6 +121,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if config.Conf.MaxSimultaneousQueries > 0 {
+		monitor.MaxSimultaneousQueries = config.Conf.MaxSimultaneousQueries
+	} else {
+		monitor.MaxSimultaneousQueries = 10
+	}
+
 	if config.Conf.Debug > 0 {
 		atomic.StoreInt32(&monitor.AtomicDebugLevel, int32(config.Conf.Debug))
 	} else {
@@ -389,6 +395,11 @@ func reloadConfig(path string) {
 
 	// Update global config parameters
 	config = newConfig
+	if config.Conf.MaxSimultaneousQueries > 0 {
+		monitor.MaxSimultaneousQueries = config.Conf.MaxSimultaneousQueries
+	} else {
+		monitor.MaxSimultaneousQueries = 10
+	}
 	if config.Conf.Debug > 0 {
 		atomic.StoreInt32(&monitor.AtomicDebugLevel, int32(config.Conf.Debug))
 	}

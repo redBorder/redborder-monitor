@@ -54,6 +54,9 @@ func (m Metric) MarshalJSON() ([]byte, error) {
 	return json.Marshal(res)
 }
 
+// MaxSimultaneousQueries is the maximum number of concurrent SNMP/Plugin queries executed per sensor at any given time.
+var MaxSimultaneousQueries int = 10
+
 // SafeSensor wraps a Sensor with a mutex to prevent concurrent runs and a cache for states.
 // lowPriority : 1 if slow/timed out/failed, 0 otherwise
 type SafeSensor struct {
@@ -241,12 +244,25 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 	newStates := make([]*MonitorState, len(ss.Sensor.Monitors))
 	var wg sync.WaitGroup
 
+	limit := MaxSimultaneousQueries
+	if limit <= 0 {
+		limit = 10
+	}
+	sem := make(chan struct{}, limit)
+
 	for i := range ss.Sensor.Monitors {
 		m := &ss.Sensor.Monitors[i]
 		if m.Oid != "" {
 			wg.Add(1)
 			go func(idx int, mon *Monitor) {
 				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+
 				res, err := processSNMPMonitor(ctx, ss, mon)
 				if err != nil {
 					LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
@@ -261,6 +277,13 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 			wg.Add(1)
 			go func(idx int, mon *Monitor) {
 				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+
 				res, err := processPluginMonitor(ctx, ss, mon)
 				if err != nil {
 					LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)

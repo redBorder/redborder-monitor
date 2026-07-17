@@ -14,6 +14,7 @@ type Conf struct {
 	Threads                 int                    `json:"threads"`
 	Timeout                 int                    `json:"timeout"`
 	MaxSNMPFails            int                    `json:"max_snmp_fails"`
+	MaxSimultaneousQueries  int                    `json:"max_simultaneous_queries"`
 	MaxKafkaFails           int                    `json:"max_kafka_fails"`
 	SleepMain               int                    `json:"sleep_main"`
 	SleepWorker             int                    `json:"sleep_worker"`
@@ -116,6 +117,7 @@ func (c *Conf) UnmarshalJSON(data []byte) error {
 		Threads                 json.RawMessage `json:"threads"`
 		Timeout                 json.RawMessage `json:"timeout"`
 		MaxSNMPFails            json.RawMessage `json:"max_snmp_fails"`
+		MaxSimultaneousQueries  json.RawMessage `json:"max_simultaneous_queries"`
 		MaxKafkaFails           json.RawMessage `json:"max_kafka_fails"`
 		SleepMain               json.RawMessage `json:"sleep_main"`
 		SleepWorker             json.RawMessage `json:"sleep_worker"`
@@ -161,6 +163,9 @@ func (c *Conf) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if err := assign(temp.MaxSNMPFails, &c.MaxSNMPFails); err != nil {
+		return err
+	}
+	if err := assign(temp.MaxSimultaneousQueries, &c.MaxSimultaneousQueries); err != nil {
 		return err
 	}
 	if err := assign(temp.MaxKafkaFails, &c.MaxKafkaFails); err != nil {
@@ -366,6 +371,7 @@ func LoadConfig(path string) (*Config, error) {
 			Threads:      10,
 			Timeout:      5,
 			MaxSNMPFails: 2,
+			MaxSimultaneousQueries: 10,
 			SleepMain:    10,
 			SleepWorker:  2,
 		},

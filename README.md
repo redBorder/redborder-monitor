@@ -35,6 +35,7 @@ Since the daemon automatically strips comments, you can include inline comments 
     "threads": 10,                      // Number of parallel worker threads
     "timeout": 5,                       // Default query timeout in seconds
     "max_snmp_fails": 2,                // Fails before moving sensor to low priority
+    "max_simultaneous_queries": 10,     // Max concurrent SNMP/Plugin queries per sensor
     "sleep_main": 10,                   // Main scheduler loop interval (seconds)
     "sleep_worker": 2,                  // Idle worker sleep interval (seconds)
     "mib_dirs": [                       // Custom directories to search for SNMP MIBs
@@ -125,6 +126,7 @@ Since the daemon automatically strips comments, you can include inline comments 
 | `threads` | Integer | `10` | Worker concurrency pool limit. |
 | `timeout` | Integer | `5` | Default query timeout in seconds. |
 | `max_snmp_fails` | Integer | `2` | Number of sequential failures before marking a sensor low priority. |
+| `max_simultaneous_queries` | Integer | `10` | Maximum number of concurrent SNMP/Plugin queries executed per sensor at any given time. |
 | `sleep_main` | Integer | `10` | Interval in seconds for the scheduler's main loop. |
 | `mib_dirs` | Array | `[]` | List of folders containing custom SNMP MIB text files to load. |
 | `kafka_broker` | String | `""` | Address of destination Kafka broker (e.g. `localhost:9092`). |
