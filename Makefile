@@ -1,4 +1,4 @@
-.PHONY: all build clean test rpm srpm distclean
+.PHONY: all build clean test lint rpm srpm distclean
 
 BINARY_NAME=redborder-monitor
 VERSION?= $(shell git describe --abbrev=6 --tags HEAD --always 2>/dev/null || echo "dev")
@@ -14,6 +14,9 @@ clean:
 
 test:
 	go test -v ./...
+
+lint:
+	golangci-lint run
 
 rpm: clean
 	$(MAKE) -C packaging/rpm rpm
