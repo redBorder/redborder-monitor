@@ -16,7 +16,14 @@ test:
 	go test -v ./...
 
 lint:
-	golangci-lint run
+	go vet ./...
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./...; \
+	elif [ -f $$(go env GOPATH)/bin/golangci-lint ]; then \
+		$$(go env GOPATH)/bin/golangci-lint run ./...; \
+	else \
+		echo "golangci-lint is not installed. Run 'go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest'"; \
+	fi
 
 rpm: clean
 	$(MAKE) -C packaging/rpm rpm

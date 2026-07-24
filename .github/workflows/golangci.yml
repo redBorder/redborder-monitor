@@ -6,7 +6,7 @@ on:
 
 jobs:
   golangci:
-    name: Run golangci-lint
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -19,8 +19,7 @@ jobs:
           cache: true
 
       - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.64.8
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
 
-      - name: Run golangci-lint
+      - name: Run Lint
         run: make lint
