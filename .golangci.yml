@@ -1,0 +1,18 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+issues:
+  exclude-use-default: true
+  exclude-rules:
+    - linters:
+        - errcheck
+      text: "Error return value of `.*(Close|Fprintf|Fprintln|Print|Println|Remove|RemoveAll)` is not checked"

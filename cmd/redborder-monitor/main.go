@@ -573,10 +573,7 @@ func searchMIBObjects(term string) {
 	}
 
 	termLower := strings.ToLower(term)
-	termWithoutDot := termLower
-	if strings.HasPrefix(termWithoutDot, ".") {
-		termWithoutDot = termWithoutDot[1:]
-	}
+	termWithoutDot := strings.TrimPrefix(termLower, ".")
 	objects := engine.Objects()
 
 	var matchedCount int
