@@ -1,6 +1,6 @@
 # redborder-monitor
 
-`rbredborder-monitor` is a concurrent, high-performance telemetry collection and device monitoring daemon. It periodically polls system statistics and network devices using SNMP, native plugins, or shell commands, processes and aggregates the collected data, and routes the metrics to Stdout, Apache Kafka, or an HTTP POST endpoint.
+`redborder-monitor` is a concurrent, high-performance telemetry collection and device monitoring daemon. It periodically polls system statistics and network devices using SNMP, native plugins, or shell commands, processes and aggregates the collected data, and routes the metrics to Stdout, Apache Kafka, or an HTTP POST endpoint.
 
 Designed for high-concurrency environments, it schedules and executes polls asynchronously while protecting healthy queries from being starved by slow or unresponsive devices.
 
