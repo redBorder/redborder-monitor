@@ -140,7 +140,7 @@ func TestRedfishPlugin_Success(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockData)
+		_ = json.NewEncoder(w).Encode(mockData)
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(handler))
 	defer server.Close()
