@@ -1,0 +1,39 @@
+name: Generate SBOM
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM
+        run: |
+          VERSION=$(cat ./VERSION 2>/dev/null || echo "latest")
+          syft scan dir:. --source-name redborder-monitor --source-version "$VERSION" -o spdx-json=redborder-monitor-sbom.spdx.json
+
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Scan SBOM with Trivy
+        run: |
+          trivy sbom \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            redborder-monitor-sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redborder-monitor-sbom-spdx
+          path: redborder-monitor-sbom.spdx.json
