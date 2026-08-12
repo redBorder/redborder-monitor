@@ -95,6 +95,7 @@ func NewMetricProducer(config *Config) *MetricProducer {
 
 		tr := &http.Transport{
 			TLSClientConfig:     tlsConfig,
+			MaxConnsPerHost:     maxConns,
 			MaxIdleConns:        maxConns,
 			MaxIdleConnsPerHost: maxConns,
 			IdleConnTimeout:     90 * time.Second,
@@ -200,6 +201,7 @@ func (p *MetricProducer) sendHTTP(data []byte) {
 		return
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
 		log.Printf("[ERROR] HTTP server returned status: %s", resp.Status)
@@ -281,6 +283,7 @@ func (p *MetricProducer) UpdateConfig(newConfig *Config) {
 			}
 			tr := &http.Transport{
 				TLSClientConfig:     tlsConfig,
+				MaxConnsPerHost:     maxConns,
 				MaxIdleConns:        maxConns,
 				MaxIdleConnsPerHost: maxConns,
 				IdleConnTimeout:     90 * time.Second,
