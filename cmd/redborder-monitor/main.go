@@ -127,6 +127,12 @@ func main() {
 		monitor.MaxSimultaneousQueries = 10
 	}
 
+	if config.Conf.MaxSNMPFails > 0 {
+		monitor.MaxSNMPFails = config.Conf.MaxSNMPFails
+	} else {
+		monitor.MaxSNMPFails = 2
+	}
+
 	if config.Conf.Debug > 0 {
 		atomic.StoreInt32(&monitor.AtomicDebugLevel, int32(config.Conf.Debug))
 	} else {
@@ -207,66 +213,50 @@ func main() {
 	}
 	monitor.SetTotalWorkers(int64(threads))
 
-	// Partition threads: allocate a portion to low priority sensors to prevent starvation of good ones
-	lowPriorityThreads := threads / 2
-	if lowPriorityThreads < 1 {
-		lowPriorityThreads = 1
-	}
-	if threads > 1 && lowPriorityThreads >= threads {
-		lowPriorityThreads = threads - 1
-	}
-	highPriorityThreads := threads - lowPriorityThreads
-
 	var wg sync.WaitGroup
 
-	// High priority workers only process the high priority queue, guaranteeing they are never blocked by slow/failed sensors
-	for i := 0; i < highPriorityThreads; i++ {
+	// All workers process high-priority sensors with strict top priority.
+	// Once the high-priority queue is drained, all workers assist in rapidly processing the low-priority queue.
+	for i := 0; i < threads; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 			for {
+				// Step 1: Drain highPrioritySensorChan immediately with top priority
 				select {
+				case <-ctx.Done():
+					return
 				case ss, ok := <-highPrioritySensorChan:
 					if !ok {
 						return
 					}
 					monitor.ProcessSensor(ctx, ss, metricChan)
-				case <-ctx.Done():
-					return
-				}
-			}
-		}(i)
-	}
-
-	// Low priority workers process the high priority queue with priority, and fall back to the low priority queue
-	for i := 0; i < lowPriorityThreads; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			for {
-				select {
-				case ss, ok := <-highPrioritySensorChan:
-					if !ok {
-						return
-					}
-					monitor.ProcessSensor(ctx, ss, metricChan)
-				case <-ctx.Done():
-					return
+					continue
 				default:
-					select {
-					case ss, ok := <-highPrioritySensorChan:
-						if !ok {
-							return
-						}
-						monitor.ProcessSensor(ctx, ss, metricChan)
-					case ss, ok := <-lowPrioritySensorChan:
-						if !ok {
-							return
-						}
-						monitor.ProcessSensor(ctx, ss, metricChan)
-					case <-ctx.Done():
+				}
+
+				// Step 2: High priority is empty right now. Process from high or low priority queue.
+				select {
+				case <-ctx.Done():
+					return
+				case ss, ok := <-highPrioritySensorChan:
+					if !ok {
 						return
 					}
+					monitor.ProcessSensor(ctx, ss, metricChan)
+				case ss, ok := <-lowPrioritySensorChan:
+					if !ok {
+						return
+					}
+					// Strict priority check: if a high-priority sensor arrived simultaneously, process high priority first
+					select {
+					case highSS, highOk := <-highPrioritySensorChan:
+						if highOk {
+							monitor.ProcessSensor(ctx, highSS, metricChan)
+						}
+					default:
+					}
+					monitor.ProcessSensor(ctx, ss, metricChan)
 				}
 			}
 		}(i)
@@ -305,8 +295,9 @@ func main() {
 				continue
 			}
 
-			staggerInterval := time.Duration(sleepMain) * time.Second / time.Duration(len(currentSensors))
+			cycleStart := time.Now()
 
+			// Dispatch all high-priority sensors immediately so workers can process them at natural parallel speed
 			for _, ss := range currentSensors {
 				select {
 				case <-ctx.Done():
@@ -322,21 +313,51 @@ func main() {
 					}
 					sensorsMu.RUnlock()
 
-					if stillActive {
-						if ss.IsLowPriority() {
-							lowPrioritySensorChan <- ss
-						} else {
-							highPrioritySensorChan <- ss
+					if stillActive && !ss.IsLowPriority() {
+						select {
+						case highPrioritySensorChan <- ss:
+						default:
 						}
 					}
 				}
+			}
 
-				if staggerInterval > 0 {
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(staggerInterval):
+			// Dispatch all low-priority sensors for background processing during remaining cycle time
+			for _, ss := range currentSensors {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					sensorsMu.RLock()
+					stillActive := false
+					for _, active := range safeSensors {
+						if active == ss {
+							stillActive = true
+							break
+						}
 					}
+					sensorsMu.RUnlock()
+
+					if stillActive && ss.IsLowPriority() {
+						select {
+						case lowPrioritySensorChan <- ss:
+						default:
+						}
+					}
+				}
+			}
+
+			// Sleep for the remainder of the sleepMain cycle
+			cycleDuration := time.Duration(sleepMain) * time.Second
+			if cycleDuration <= 0 {
+				cycleDuration = 10 * time.Second
+			}
+			elapsed := time.Since(cycleStart)
+			if cycleDuration > elapsed {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(cycleDuration - elapsed):
 				}
 			}
 		}
@@ -399,6 +420,11 @@ func reloadConfig(path string) {
 		monitor.MaxSimultaneousQueries = config.Conf.MaxSimultaneousQueries
 	} else {
 		monitor.MaxSimultaneousQueries = 10
+	}
+	if config.Conf.MaxSNMPFails > 0 {
+		monitor.MaxSNMPFails = config.Conf.MaxSNMPFails
+	} else {
+		monitor.MaxSNMPFails = 2
 	}
 	if config.Conf.Debug > 0 {
 		atomic.StoreInt32(&monitor.AtomicDebugLevel, int32(config.Conf.Debug))
