@@ -1,4 +1,4 @@
-name: RPM Build and Upload
+name: RPM Build, SBOM, and Release
 
 on:
   push:
@@ -9,25 +9,21 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Create tag based on metadata.rb
+      - name: Create tag based on VERSION
         id: create_tag
         run: |
           TAG=$(cat ./VERSION)
           echo "TAG=$TAG" >> $GITHUB_ENV
         shell: bash
-
-      - name: Set Version
-        run: echo "VERSION=${{ env.TAG }}" >> $GITHUB_ENV
 
       - name: Run Docker Container
         run: docker run --privileged -d --name builder --network host rockylinux:9 /bin/sleep infinity
@@ -57,10 +53,31 @@ jobs:
         run: |
           find ./rpms -type f -not -name '*.rpm' -exec rm {} \;
 
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM
+        run: |
+          syft scan dir:. --source-name redborder-monitor --source-version "${{ env.TAG }}" -o spdx-json=redborder-monitor-sbom.spdx.json
+
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Scan SBOM with Trivy
+        run: |
+          trivy sbom \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            redborder-monitor-sbom.spdx.json
+
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
         with:
-          files: ./rpms/*
+          files: |
+            ./rpms/*
+            redborder-monitor-sbom.spdx.json
           tag_name: ${{ env.TAG }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

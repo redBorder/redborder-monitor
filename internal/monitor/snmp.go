@@ -200,13 +200,19 @@ func setupSNMPParams(ctx context.Context, ip, community, version string, timeout
 		timeoutMs = 5000
 	}
 
+	retries := 2
+	attemptTimeoutMs := timeoutMs / (retries + 1)
+	if attemptTimeoutMs < 100 {
+		attemptTimeoutMs = timeoutMs
+	}
+
 	params := &gosnmp.GoSNMP{
 		Target:    ip,
 		Port:      161,
 		Community: community,
 		Version:   snmpVer,
-		Timeout:   time.Duration(timeoutMs) * time.Millisecond,
-		Retries:   2,
+		Timeout:   time.Duration(attemptTimeoutMs) * time.Millisecond,
+		Retries:   retries,
 		Context:   ctx,
 	}
 

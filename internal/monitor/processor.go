@@ -57,6 +57,9 @@ func (m Metric) MarshalJSON() ([]byte, error) {
 // MaxSimultaneousQueries is the maximum number of concurrent SNMP/Plugin queries executed per sensor at any given time.
 var MaxSimultaneousQueries int = 10
 
+// MaxSNMPFails is the maximum number of consecutive failed cycles before marking a sensor low priority.
+var MaxSNMPFails int = 2
+
 // SafeSensor wraps a Sensor with a mutex to prevent concurrent runs and a cache for states.
 // lowPriority : 1 if slow/timed out/failed, 0 otherwise
 type SafeSensor struct {
@@ -65,6 +68,7 @@ type SafeSensor struct {
 	Cache             map[string]*MonitorState
 	Enrichment        map[string]interface{}
 	lowPriority       int32
+	consecutiveFails  int32
 	lastRunTimestamp  int64
 	lastRunDurationMs int64
 	lastError         string
@@ -84,6 +88,18 @@ func (ss *SafeSensor) SetLowPriority(low bool) {
 		val = 1
 	}
 	atomic.StoreInt32(&ss.lowPriority, val)
+}
+
+func (ss *SafeSensor) IncConsecutiveFails() int32 {
+	return atomic.AddInt32(&ss.consecutiveFails, 1)
+}
+
+func (ss *SafeSensor) ResetConsecutiveFails() {
+	atomic.StoreInt32(&ss.consecutiveFails, 0)
+}
+
+func (ss *SafeSensor) GetConsecutiveFails() int32 {
+	return atomic.LoadInt32(&ss.consecutiveFails)
 }
 
 func NewSafeSensor(sensor *Sensor) *SafeSensor {
@@ -217,6 +233,13 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 	}
 	defer ss.Mutex.Unlock()
 
+	timeoutMs := ss.Sensor.Timeout
+	if timeoutMs <= 0 {
+		timeoutMs = 5000
+	}
+	sensorCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+
 	IncActiveWorkers()
 	defer DecActiveWorkers()
 	IncSensorsProcessed()
@@ -258,12 +281,12 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 				defer wg.Done()
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
+				case <-sensorCtx.Done():
 					return
 				}
 				defer func() { <-sem }()
 
-				res, err := processSNMPMonitor(ctx, ss, mon)
+				res, err := processSNMPMonitor(sensorCtx, ss, mon)
 				if err != nil {
 					LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
 					atomic.StoreInt32(&hasError, 1)
@@ -279,12 +302,12 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 				defer wg.Done()
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
+				case <-sensorCtx.Done():
 					return
 				}
 				defer func() { <-sem }()
 
-				res, err := processPluginMonitor(ctx, ss, mon)
+				res, err := processPluginMonitor(sensorCtx, ss, mon)
 				if err != nil {
 					LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)
 					atomic.StoreInt32(&hasError, 1)
@@ -309,7 +332,7 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 			newState = newStates[i]
 		} else if m.System != "" {
 			var err error
-			newState, err = processSystemMonitor(ctx, ss, m)
+			newState, err = processSystemMonitor(sensorCtx, ss, m)
 			if err != nil {
 				LogMsg(LogWarning, "System command failed for monitor '%s' on sensor '%s': %v", m.Name, ss.Sensor.SensorName, err)
 				atomic.StoreInt32(&hasError, 1)
@@ -318,7 +341,7 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 				errorsMu.Unlock()
 			}
 		} else if m.Op != "" {
-			newState = processOpMonitor(ctx, ss, m, currentVals)
+			newState = processOpMonitor(sensorCtx, ss, m, currentVals)
 		}
 
 		if newState == nil {
@@ -344,16 +367,34 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 
 	// Measure duration and update priority status at the end of the entire query cycle
 	duration := time.Since(start)
-	threshold := time.Duration(ss.Sensor.Timeout) * time.Millisecond * 9 / 10
+	threshold := time.Duration(timeoutMs) * time.Millisecond * 9 / 10
 
 	wasLowPriority := ss.IsLowPriority()
-	isLowPriorityNow := duration >= threshold || atomic.LoadInt32(&hasError) == 1
-	ss.SetLowPriority(isLowPriorityNow)
+	hadFailure := duration >= threshold || atomic.LoadInt32(&hasError) == 1
 
-	if isLowPriorityNow && !wasLowPriority {
-		LogMsg(LogWarning, "Sensor '%s' transitioned to SLOW priority (Duration: %v, Timeout: %dms, HasError: %t)", ss.Sensor.SensorName, duration, ss.Sensor.Timeout, atomic.LoadInt32(&hasError) == 1)
-	} else if !isLowPriorityNow && wasLowPriority {
-		LogMsg(LogNotice, "Sensor '%s' recovered to FAST priority (Duration: %v)", ss.Sensor.SensorName, duration)
+	maxFails := MaxSNMPFails
+	if maxFails <= 0 {
+		maxFails = 2
+	}
+
+	if hadFailure {
+		fails := ss.IncConsecutiveFails()
+		if fails >= int32(maxFails) {
+			ss.SetLowPriority(true)
+			if !wasLowPriority {
+				LogMsg(LogWarning, "Sensor '%s' transitioned to SLOW priority (Duration: %v, Timeout: %dms, HasError: %t, ConsecutiveFails: %d)",
+					ss.Sensor.SensorName, duration, timeoutMs, atomic.LoadInt32(&hasError) == 1, fails)
+			}
+		} else {
+			LogMsg(LogInfo, "Sensor '%s' failed query cycle (%d/%d consecutive fails, Duration: %v, HasError: %t)",
+				ss.Sensor.SensorName, fails, maxFails, duration, atomic.LoadInt32(&hasError) == 1)
+		}
+	} else {
+		ss.ResetConsecutiveFails()
+		if wasLowPriority {
+			ss.SetLowPriority(false)
+			LogMsg(LogNotice, "Sensor '%s' recovered to FAST priority (Duration: %v)", ss.Sensor.SensorName, duration)
+		}
 	}
 
 	// Update sensor stats telemetry
@@ -371,7 +412,7 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 	}
 	ss.statsMu.Unlock()
 
-	LogMsg(LogDebug, "Finished query cycle for sensor '%s' in %v (Priority: %s, LowPriority: %t)", ss.Sensor.SensorName, duration, priority, isLowPriorityNow)
+	LogMsg(LogDebug, "Finished query cycle for sensor '%s' in %v (Priority: %s, LowPriority: %t)", ss.Sensor.SensorName, duration, priority, ss.IsLowPriority())
 }
 
 func processSystemMonitor(ctx context.Context, ss *SafeSensor, m *Monitor) (*MonitorState, error) {

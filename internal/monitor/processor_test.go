@@ -216,7 +216,7 @@ func TestSafeSensorPriority(t *testing.T) {
 		t.Errorf("Expected fast-sensor to not be low priority")
 	}
 
-	// 2. Slow sensor (Low Priority)
+	// 2. Slow sensor (Low Priority after consecutive failures)
 	sSlow := &Sensor{
 		SensorID:   2,
 		SensorName: "slow-sensor",
@@ -229,9 +229,16 @@ func TestSafeSensorPriority(t *testing.T) {
 		},
 	}
 	ssSlow := NewSafeSensor(sSlow)
+	// First slow run: consecutive failure count = 1, should still be high priority
+	ProcessSensor(context.Background(), ssSlow, metricChan)
+	if ssSlow.IsLowPriority() {
+		t.Errorf("Expected slow-sensor to still be high priority after 1st failure (MaxSNMPFails=2)")
+	}
+
+	// Second slow run: consecutive failure count = 2, should now transition to low priority
 	ProcessSensor(context.Background(), ssSlow, metricChan)
 	if !ssSlow.IsLowPriority() {
-		t.Errorf("Expected slow-sensor to be marked as low priority")
+		t.Errorf("Expected slow-sensor to be marked as low priority after 2 consecutive failures")
 	}
 }
 
@@ -289,10 +296,23 @@ func TestProcessSensor_TransitionLowPriorityOnError(t *testing.T) {
 		t.Fatal("initially sensor should not be low priority")
 	}
 
+	// 1st failure: should not demote yet (resilient to single transient failure)
 	ProcessSensor(context.Background(), ss, metricChan)
+	if ss.IsLowPriority() {
+		t.Errorf("expected sensor to remain high priority after 1st failure")
+	}
 
+	// 2nd consecutive failure: should now demote to low priority
+	ProcessSensor(context.Background(), ss, metricChan)
 	if !ss.IsLowPriority() {
-		t.Errorf("expected sensor to transition to low priority because command failed")
+		t.Errorf("expected sensor to transition to low priority after 2 consecutive failures")
+	}
+
+	// Recovery run: fixing the command should recover back to fast priority
+	ss.Sensor.Monitors[0].System = "echo ok"
+	ProcessSensor(context.Background(), ss, metricChan)
+	if ss.IsLowPriority() {
+		t.Errorf("expected sensor to recover to high priority after successful cycle")
 	}
 }
 
