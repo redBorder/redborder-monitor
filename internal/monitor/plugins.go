@@ -1,13 +1,17 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +110,29 @@ var PluginsRegistry = map[string]*PluginDef{
 			{Name: "sensor_name", Type: "string", Default: "none", Description: "Specific sensor to query from SDR (only applicable when command is \"sdr\" or \"sensors\")"},
 		},
 	},
+	"http_agent": {
+		Func:        HttpPlugin,
+		Description: "Performs native HTTP/HTTPS queries and extracts status codes, response times, or bodies.",
+		Params: []PluginParam{
+			{Name: "url", Type: "string", Default: "\"http://\" + parent sensor's IP", Description: "Target URL to connect to and retrieve data"},
+			{Name: "method", Type: "string", Default: "\"GET\"", Description: "HTTP method: GET, POST, PUT, HEAD, DELETE, PATCH"},
+			{Name: "expected_status", Type: "int", Default: "200", Description: "Expected HTTP response status code"},
+			{Name: "body", Type: "string", Default: "none", Description: "Request body payload"},
+			{Name: "headers", Type: "map/string", Default: "none", Description: "Custom request headers as key-value map or JSON string"},
+			{Name: "metric", Type: "string", Default: "\"status\"", Description: "Metric to output: \"status\" (HTTP status code), \"latency\" / \"response_time\" (in ms), \"body\", \"json\""},
+			{Name: "only_status", Type: "bool", Default: "true", Description: "If true, only returns HTTP status code as integer"},
+			{Name: "redirect", Type: "bool", Default: "false", Description: "Follow HTTP redirects (up to 20)"},
+			{Name: "proxy", Type: "string", Default: "none", Description: "HTTP Proxy URL using format [protocol://][user:pass@]proxy:port"},
+			{Name: "http_auth", Type: "string", Default: "none", Description: "HTTP server authentication method (\"basic\")"},
+			{Name: "username", Type: "string", Default: "none", Description: "HTTP Basic Auth username"},
+			{Name: "password", Type: "string", Default: "none", Description: "HTTP Basic Auth password"},
+			{Name: "ssl_verify_peer", Type: "bool", Default: "false", Description: "Verify SSL peer certificate"},
+			{Name: "ssl_ca_file", Type: "string", Default: "none", Description: "Path to CA certificate file for SSL verification"},
+			{Name: "ssl_cert", Type: "string", Default: "none", Description: "Path to SSL client certificate"},
+			{Name: "ssl_key", Type: "string", Default: "none", Description: "Path to SSL client private key"},
+			{Name: "timeout_ms", Type: "int", Default: "sensor's timeout", Description: "Request timeout in milliseconds"},
+		},
+	},
 }
 
 // Helper functions for parameter extraction
@@ -139,6 +166,53 @@ func getIntParam(params map[string]interface{}, key string, def int) int {
 		}
 	}
 	return def
+}
+
+func getBoolParam(params map[string]interface{}, key string, def bool) bool {
+	if params == nil {
+		return def
+	}
+	if val, ok := params[key]; ok {
+		switch v := val.(type) {
+		case bool:
+			return v
+		case string:
+			return strings.ToLower(v) == "true" || v == "1"
+		case int:
+			return v != 0
+		case float64:
+			return v != 0
+		}
+	}
+	return def
+}
+
+func getHeadersParam(params map[string]interface{}, key string) map[string]string {
+	res := make(map[string]string)
+	if params == nil {
+		return res
+	}
+	val, ok := params[key]
+	if !ok || val == nil {
+		return res
+	}
+
+	switch v := val.(type) {
+	case map[string]string:
+		return v
+	case map[string]interface{}:
+		for k, valItem := range v {
+			res[k] = fmt.Sprintf("%v", valItem)
+		}
+	case string:
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(v), &parsed); err == nil {
+			for k, valItem := range parsed {
+				res[k] = fmt.Sprintf("%v", valItem)
+			}
+		}
+	}
+	return res
 }
 
 // 1. Ping / Fping Plugin
@@ -787,4 +861,234 @@ func IpmiPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 	default:
 		return "ok", nil
 	}
+}
+
+// 7. HTTP / HTTP Agent Plugin
+// Performs native HTTP/HTTPS queries and extracts status codes, response times, or bodies.
+func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error) {
+	rawURL := getStringParam(m.Params, "url", "")
+	if rawURL == "" {
+		if ss.Sensor.SensorIP != "" {
+			rawURL = "http://" + ss.Sensor.SensorIP
+		} else {
+			return "0", fmt.Errorf("missing 'url' parameter for http plugin")
+		}
+	}
+
+	method := strings.ToUpper(getStringParam(m.Params, "method", getStringParam(m.Params, "type", "GET")))
+	bodyStr := getStringParam(m.Params, "body", "")
+	expectedStatus := getIntParam(m.Params, "expected_status", getIntParam(m.Params, "status", 200))
+	metric := strings.ToLower(getStringParam(m.Params, "metric", ""))
+	onlyStatus := getBoolParam(m.Params, "only_status", true)
+	if metric == "" {
+		if onlyStatus {
+			metric = "status"
+		} else {
+			metric = "json"
+		}
+	}
+	followRedirects := getBoolParam(m.Params, "redirect", getBoolParam(m.Params, "follow_redirects", false))
+	proxyStr := getStringParam(m.Params, "proxy", "")
+	httpAuth := getStringParam(m.Params, "http_auth", "")
+	authUser := getStringParam(m.Params, "username", getStringParam(m.Params, "http_user", ""))
+	authPass := getStringParam(m.Params, "password", getStringParam(m.Params, "http_pass", ""))
+
+	sslVerifyPeer := getBoolParam(m.Params, "ssl_verify_peer", getBoolParam(m.Params, "ssl_peer", false))
+	sslCAFile := getStringParam(m.Params, "ssl_ca_file", "")
+	sslCert := getStringParam(m.Params, "ssl_cert", "")
+	sslKey := getStringParam(m.Params, "ssl_key", "")
+
+	timeoutMs := getIntParam(m.Params, "timeout_ms", getIntParam(m.Params, "timeout", ss.Sensor.Timeout))
+	if timeoutMs < 100 && timeoutMs > 0 {
+		timeoutMs = timeoutMs * 1000
+	}
+	if timeoutMs <= 0 {
+		timeoutMs = 5000
+	}
+
+	// Configure Transport
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: !sslVerifyPeer,
+	}
+
+	var loadedCACerts []*x509.Certificate
+	if sslCAFile != "" {
+		caCertPool, err := x509.SystemCertPool()
+		if err != nil || caCertPool == nil {
+			caCertPool = x509.NewCertPool()
+		}
+		caCertPEM, err := os.ReadFile(sslCAFile)
+		if err != nil {
+			return "0", fmt.Errorf("failed to read ssl_ca_file '%s': %w", sslCAFile, err)
+		}
+		caCertPool.AppendCertsFromPEM(caCertPEM)
+		tlsConfig.RootCAs = caCertPool
+
+		// Also parse individual certificates from PEM for self-signed pinned certificate support (like curl --cacert)
+		rest := caCertPEM
+		for {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type == "CERTIFICATE" {
+				if c, err := x509.ParseCertificate(block.Bytes); err == nil {
+					loadedCACerts = append(loadedCACerts, c)
+				}
+			}
+		}
+	}
+
+	if sslVerifyPeer && len(loadedCACerts) > 0 {
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("no certificate presented by server")
+			}
+
+			// 1. Check all certificates presented in the TLS handshake against loadedCACerts
+			for _, rawCert := range rawCerts {
+				if parsedCert, err := x509.ParseCertificate(rawCert); err == nil {
+					for _, ca := range loadedCACerts {
+						if parsedCert.Equal(ca) || bytes.Equal(parsedCert.Raw, ca.Raw) || (bytes.Equal(parsedCert.RawSubject, ca.RawSubject) && bytes.Equal(parsedCert.RawSubjectPublicKeyInfo, ca.RawSubjectPublicKeyInfo)) {
+							return nil
+						}
+						if err := parsedCert.CheckSignatureFrom(ca); err == nil {
+							return nil
+						}
+					}
+				}
+			}
+
+			// 2. Standard chain verification against RootCAs
+			firstCert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("failed to parse peer certificate: %w", err)
+			}
+
+			opts := x509.VerifyOptions{
+				Roots:         tlsConfig.RootCAs,
+				CurrentTime:   time.Now(),
+				Intermediates: x509.NewCertPool(),
+			}
+			for i := 1; i < len(rawCerts); i++ {
+				if intermediate, err := x509.ParseCertificate(rawCerts[i]); err == nil {
+					opts.Intermediates.AddCert(intermediate)
+				}
+			}
+			if _, err := firstCert.Verify(opts); err != nil {
+				return fmt.Errorf("tls: failed to verify certificate: %w", err)
+			}
+			return nil
+		}
+	}
+
+	if sslCert != "" || sslKey != "" {
+		if sslCert == "" || sslKey == "" {
+			return "0", fmt.Errorf("both ssl_cert and ssl_key must be specified together")
+		}
+		cert, err := tls.LoadX509KeyPair(sslCert, sslKey)
+		if err != nil {
+			return "0", fmt.Errorf("failed to load SSL keypair (cert: '%s', key: '%s'): %w", sslCert, sslKey, err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	if proxyStr != "" {
+		if pURL, err := url.Parse(proxyStr); err == nil {
+			tr.Proxy = http.ProxyURL(pURL)
+		}
+	}
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   time.Duration(timeoutMs) * time.Millisecond,
+	}
+
+	if !followRedirects {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	} else {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 20 {
+				return fmt.Errorf("stopped after 20 redirects")
+			}
+			return nil
+		}
+	}
+
+	var reqBody io.Reader
+	if bodyStr != "" {
+		reqBody = strings.NewReader(bodyStr)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, reqBody)
+	if err != nil {
+		return "0", err
+	}
+
+	// Set custom headers
+	headers := getHeadersParam(m.Params, "headers")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	// HTTP Auth
+	if strings.EqualFold(httpAuth, "basic") || (authUser != "" && httpAuth == "") {
+		req.SetBasicAuth(authUser, authPass)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	duration := time.Since(start)
+
+	if err != nil {
+		return "0", err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var outputValue string
+	switch metric {
+	case "latency", "response_time", "rtt":
+		latencyMs := float64(duration) / float64(time.Millisecond)
+		outputValue = fmt.Sprintf("%.2f", latencyMs)
+	case "body":
+		outputValue = string(respBody)
+	case "json":
+		respHeaders := make(map[string]string)
+		for k, v := range resp.Header {
+			respHeaders[k] = strings.Join(v, ", ")
+		}
+		jsonRes := map[string]interface{}{
+			"status":  resp.StatusCode,
+			"message": resp.Status,
+			"headers": respHeaders,
+			"body":    string(respBody),
+		}
+		if data, err := json.Marshal(jsonRes); err == nil {
+			outputValue = string(data)
+		} else {
+			outputValue = fmt.Sprintf("%d", resp.StatusCode)
+		}
+	default:
+		// Default to status code (or only_status mode)
+		outputValue = fmt.Sprintf("%d", resp.StatusCode)
+	}
+
+	if expectedStatus > 0 && resp.StatusCode != expectedStatus {
+		return outputValue, fmt.Errorf("unexpected HTTP response status: %d (expected %d)", resp.StatusCode, expectedStatus)
+	}
+
+	return outputValue, nil
 }
