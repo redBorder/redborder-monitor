@@ -291,17 +291,18 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 				if err != nil {
 					if errors.Is(err, ErrSNMPObjectNotFound) {
 						// Agent is reachable, it just doesn't expose this OID.
-						// Don't treat this as a sensor-level failure (it would
-						// never recover and would needlessly demote a healthy
-						// sensor to low priority).
+						// Recorded in errorsList/lastError for visibility, but
+						// hasError is deliberately not set: it shouldn't count
+						// toward the consecutive-fail counter or demote an
+						// otherwise healthy sensor to low priority.
 						LogMsg(LogInfo, "SNMP OID not available for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
 					} else {
 						LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
 						atomic.StoreInt32(&hasError, 1)
-						errorsMu.Lock()
-						errorsList = append(errorsList, fmt.Sprintf("SNMP:%s: %v", mon.Name, err))
-						errorsMu.Unlock()
 					}
+					errorsMu.Lock()
+					errorsList = append(errorsList, fmt.Sprintf("SNMP:%s: %v", mon.Name, err))
+					errorsMu.Unlock()
 				}
 				newStates[idx] = res
 			}(i, m)
@@ -320,15 +321,16 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 				if err != nil {
 					if errors.Is(err, ErrSNMPObjectNotFound) {
 						// Agent is reachable, it just doesn't expose this OID.
-						// Don't treat this as a sensor-level failure.
+						// See comment in the SNMP branch above: recorded for
+						// visibility, but not counted as hasError.
 						LogMsg(LogInfo, "SNMP OID not available for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
 					} else {
 						LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)
 						atomic.StoreInt32(&hasError, 1)
-						errorsMu.Lock()
-						errorsList = append(errorsList, fmt.Sprintf("PLUGIN:%s: %v", mon.Name, err))
-						errorsMu.Unlock()
 					}
+					errorsMu.Lock()
+					errorsList = append(errorsList, fmt.Sprintf("PLUGIN:%s: %v", mon.Name, err))
+					errorsMu.Unlock()
 				}
 				newStates[idx] = res
 			}(i, m)
