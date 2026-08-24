@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +14,22 @@ import (
 	"github.com/golangsnmp/gomib/mib"
 	"github.com/gosnmp/gosnmp"
 )
+
+// ErrSNMPObjectNotFound indicates the agent answered the request but does not
+// expose the requested OID (SNMPv2c exception varbind: noSuchObject,
+// noSuchInstance, or endOfMibView). This is distinct from a connectivity or
+// timeout failure: the agent is reachable, it just doesn't have that value.
+var ErrSNMPObjectNotFound = errors.New("SNMP object not found on agent")
+
+// isSNMPExceptionType reports whether a PDU type is one of the SNMPv2c
+// exception varbinds (as opposed to an actual value).
+func isSNMPExceptionType(t gosnmp.Asn1BER) bool {
+	switch t {
+	case gosnmp.NoSuchObject, gosnmp.NoSuchInstance, gosnmp.EndOfMibView:
+		return true
+	}
+	return false
+}
 
 var (
 	MibEngine   *mib.Mib
@@ -308,6 +325,10 @@ func SolveSNMPQuery(ctx context.Context, ip, community, version string, timeoutM
 	}
 
 	pdu := result.Variables[0]
+	if isSNMPExceptionType(pdu.Type) {
+		return "0", 0, fmt.Errorf("%w: OID %s (%v)", ErrSNMPObjectNotFound, translatedOid, pdu.Type)
+	}
+
 	strVal, floatVal := decodeSNMPPDU(pdu)
 	return strVal, floatVal, nil
 }

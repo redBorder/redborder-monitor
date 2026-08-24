@@ -2,6 +2,8 @@ package monitor
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gosnmp/gosnmp"
@@ -127,6 +129,31 @@ func TestSolveSNMPQuery_Failure(t *testing.T) {
 	}
 	if sVal != "0" || fVal != 0 {
 		t.Errorf("expected default values ('0', 0) on error, got ('%s', %f)", sVal, fVal)
+	}
+}
+
+func TestIsSNMPExceptionType(t *testing.T) {
+	exceptionTypes := []gosnmp.Asn1BER{gosnmp.NoSuchObject, gosnmp.NoSuchInstance, gosnmp.EndOfMibView}
+	for _, typ := range exceptionTypes {
+		if !isSNMPExceptionType(typ) {
+			t.Errorf("expected %v to be treated as an SNMP exception type", typ)
+		}
+	}
+
+	valueTypes := []gosnmp.Asn1BER{gosnmp.OctetString, gosnmp.Integer, gosnmp.Counter32, gosnmp.Gauge32, gosnmp.TimeTicks, gosnmp.Counter64}
+	for _, typ := range valueTypes {
+		if isSNMPExceptionType(typ) {
+			t.Errorf("did not expect %v to be treated as an SNMP exception type", typ)
+		}
+	}
+}
+
+func TestErrSNMPObjectNotFound_Wrapping(t *testing.T) {
+	// SolveSNMPQuery wraps ErrSNMPObjectNotFound with fmt.Errorf("%w: ...");
+	// verify callers can still detect it via errors.Is, as processSNMPMonitor does.
+	wrapped := fmt.Errorf("%w: OID .1.3.6.1.2.1.1.3.0 (%v)", ErrSNMPObjectNotFound, gosnmp.NoSuchObject)
+	if !errors.Is(wrapped, ErrSNMPObjectNotFound) {
+		t.Error("expected wrapped error to match ErrSNMPObjectNotFound via errors.Is")
 	}
 }
 

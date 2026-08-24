@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -288,11 +289,19 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 
 				res, err := processSNMPMonitor(sensorCtx, ss, mon)
 				if err != nil {
-					LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
-					atomic.StoreInt32(&hasError, 1)
-					errorsMu.Lock()
-					errorsList = append(errorsList, fmt.Sprintf("SNMP:%s: %v", mon.Name, err))
-					errorsMu.Unlock()
+					if errors.Is(err, ErrSNMPObjectNotFound) {
+						// Agent is reachable, it just doesn't expose this OID.
+						// Don't treat this as a sensor-level failure (it would
+						// never recover and would needlessly demote a healthy
+						// sensor to low priority).
+						LogMsg(LogInfo, "SNMP OID not available for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
+					} else {
+						LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
+						atomic.StoreInt32(&hasError, 1)
+						errorsMu.Lock()
+						errorsList = append(errorsList, fmt.Sprintf("SNMP:%s: %v", mon.Name, err))
+						errorsMu.Unlock()
+					}
 				}
 				newStates[idx] = res
 			}(i, m)
@@ -309,11 +318,17 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 
 				res, err := processPluginMonitor(sensorCtx, ss, mon)
 				if err != nil {
-					LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)
-					atomic.StoreInt32(&hasError, 1)
-					errorsMu.Lock()
-					errorsList = append(errorsList, fmt.Sprintf("PLUGIN:%s: %v", mon.Name, err))
-					errorsMu.Unlock()
+					if errors.Is(err, ErrSNMPObjectNotFound) {
+						// Agent is reachable, it just doesn't expose this OID.
+						// Don't treat this as a sensor-level failure.
+						LogMsg(LogInfo, "SNMP OID not available for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
+					} else {
+						LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)
+						atomic.StoreInt32(&hasError, 1)
+						errorsMu.Lock()
+						errorsList = append(errorsList, fmt.Sprintf("PLUGIN:%s: %v", mon.Name, err))
+						errorsMu.Unlock()
+					}
 				}
 				newStates[idx] = res
 			}(i, m)
@@ -429,6 +444,11 @@ func processPluginMonitor(ctx context.Context, ss *SafeSensor, m *Monitor) (*Mon
 	}
 	out, err := pluginDef.Func(ctx, ss, m)
 	if err != nil {
+		if errors.Is(err, ErrSNMPObjectNotFound) {
+			// The agent responded but doesn't expose this OID at all.
+			// Don't publish a misleading 0 for it; just skip this monitor this cycle.
+			return nil, err
+		}
 		if out == "" {
 			out = "0"
 		}
@@ -452,7 +472,13 @@ func processSNMPMonitor(ctx context.Context, ss *SafeSensor, m *Monitor) (*Monit
 		ss.Sensor.SnmpPrivPassword,
 	)
 	if err != nil {
-		// On SNMP fail, default to 0
+		if errors.Is(err, ErrSNMPObjectNotFound) {
+			// The agent responded but doesn't expose this OID at all
+			// (noSuchObject/noSuchInstance/endOfMibView). Don't publish a
+			// misleading 0 for it; just skip this monitor this cycle.
+			return nil, err
+		}
+		// On other SNMP failures (timeout, connection refused...), default to 0
 		outStr = "0"
 		outFloat = 0
 	}
