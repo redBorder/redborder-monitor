@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -288,8 +289,17 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 
 				res, err := processSNMPMonitor(sensorCtx, ss, mon)
 				if err != nil {
-					LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
-					atomic.StoreInt32(&hasError, 1)
+					if errors.Is(err, ErrSNMPObjectNotFound) || errors.Is(err, ErrSNMPNonNumericValue) || errors.Is(err, ErrSNMPInvalidOID) {
+						// Agent is reachable, but doesn't expose this OID, returned non-numeric text, or OID is unresolvable.
+						// Recorded in errorsList/lastError for visibility, but
+						// hasError is deliberately not set: it shouldn't count
+						// toward the consecutive-fail counter or demote an
+						// otherwise healthy sensor to low priority.
+						LogMsg(LogInfo, "SNMP OID not available, non-numeric, or unresolvable for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
+					} else {
+						LogMsg(LogWarning, "SNMP query failed for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
+						atomic.StoreInt32(&hasError, 1)
+					}
 					errorsMu.Lock()
 					errorsList = append(errorsList, fmt.Sprintf("SNMP:%s: %v", mon.Name, err))
 					errorsMu.Unlock()
@@ -309,8 +319,15 @@ func ProcessSensor(ctx context.Context, ss *SafeSensor, outputChan chan<- Metric
 
 				res, err := processPluginMonitor(sensorCtx, ss, mon)
 				if err != nil {
-					LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)
-					atomic.StoreInt32(&hasError, 1)
+					if errors.Is(err, ErrSNMPObjectNotFound) || errors.Is(err, ErrSNMPNonNumericValue) || errors.Is(err, ErrSNMPInvalidOID) {
+						// Agent is reachable, but doesn't expose this OID, returned non-numeric text, or OID is unresolvable.
+						// See comment in the SNMP branch above: recorded for
+						// visibility, but not counted as hasError.
+						LogMsg(LogInfo, "Plugin OID not available, non-numeric, or unresolvable for monitor '%s' on sensor '%s': %v", mon.Name, ss.Sensor.SensorName, err)
+					} else {
+						LogMsg(LogWarning, "Plugin '%s' failed for monitor '%s' on sensor '%s': %v", mon.Plugin, mon.Name, ss.Sensor.SensorName, err)
+						atomic.StoreInt32(&hasError, 1)
+					}
 					errorsMu.Lock()
 					errorsList = append(errorsList, fmt.Sprintf("PLUGIN:%s: %v", mon.Name, err))
 					errorsMu.Unlock()
@@ -429,6 +446,11 @@ func processPluginMonitor(ctx context.Context, ss *SafeSensor, m *Monitor) (*Mon
 	}
 	out, err := pluginDef.Func(ctx, ss, m)
 	if err != nil {
+		if errors.Is(err, ErrSNMPObjectNotFound) || errors.Is(err, ErrSNMPNonNumericValue) || errors.Is(err, ErrSNMPInvalidOID) {
+			// The agent responded but doesn't expose this OID, returned non-numeric text, or OID is unresolvable.
+			// Don't publish a misleading 0 for it; just skip this monitor this cycle.
+			return nil, err
+		}
 		if out == "" {
 			out = "0"
 		}
@@ -452,7 +474,12 @@ func processSNMPMonitor(ctx context.Context, ss *SafeSensor, m *Monitor) (*Monit
 		ss.Sensor.SnmpPrivPassword,
 	)
 	if err != nil {
-		// On SNMP fail, default to 0
+		if errors.Is(err, ErrSNMPObjectNotFound) || errors.Is(err, ErrSNMPNonNumericValue) || errors.Is(err, ErrSNMPInvalidOID) {
+			// The agent responded with an exception, returned non-numeric text, or OID is unresolvable.
+			// Don't publish a misleading 0 for it; just skip this monitor this cycle.
+			return nil, err
+		}
+		// On other SNMP failures (timeout, connection refused...), default to 0
 		outStr = "0"
 		outFloat = 0
 	}

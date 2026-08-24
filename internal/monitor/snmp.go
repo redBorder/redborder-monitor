@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +14,29 @@ import (
 	"github.com/golangsnmp/gomib/mib"
 	"github.com/gosnmp/gosnmp"
 )
+
+// ErrSNMPObjectNotFound indicates the agent answered the request but does not
+// expose the requested OID (SNMPv2c exception varbind: noSuchObject,
+// noSuchInstance, or endOfMibView). This is distinct from a connectivity or
+// timeout failure: the agent is reachable, it just doesn't have that value.
+var ErrSNMPObjectNotFound = errors.New("SNMP object not found on agent")
+
+// ErrSNMPNonNumericValue indicates that an SNMP query returned a non-numeric string
+// (such as text description or error text) when a numeric value was expected.
+var ErrSNMPNonNumericValue = errors.New("SNMP returned non-numeric value")
+
+// ErrSNMPInvalidOID indicates that an SNMP OID was invalid or could not be resolved to numeric dotted format.
+var ErrSNMPInvalidOID = errors.New("invalid or unresolvable SNMP OID")
+
+// isSNMPExceptionType reports whether a PDU type is one of the SNMPv2c
+// exception varbinds (as opposed to an actual value).
+func isSNMPExceptionType(t gosnmp.Asn1BER) bool {
+	switch t {
+	case gosnmp.NoSuchObject, gosnmp.NoSuchInstance, gosnmp.EndOfMibView:
+		return true
+	}
+	return false
+}
 
 var (
 	MibEngine   *mib.Mib
@@ -183,6 +207,26 @@ func TranslateOID(oidStr string) string {
 	return oidStr
 }
 
+// isValidNumericOID checks if an OID string is in valid dotted-decimal format (e.g. ".1.3.6.1.2.1" or "1.3.6.1.2.1").
+func isValidNumericOID(oid string) bool {
+	oid = strings.TrimPrefix(oid, ".")
+	if oid == "" {
+		return false
+	}
+	parts := strings.Split(oid, ".")
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // setupSNMPParams creates and configures a GoSNMP instance with the given credentials and timeouts.
 func setupSNMPParams(ctx context.Context, ip, community, version string, timeoutMs int,
 	username, securityLevel, authProtocol, authPassword, privProtocol, privPassword string) *gosnmp.GoSNMP {
@@ -284,6 +328,9 @@ func setupSNMPParams(ctx context.Context, ip, community, version string, timeout
 func SolveSNMPQuery(ctx context.Context, ip, community, version string, timeoutMs int, oidStr string,
 	username, securityLevel, authProtocol, authPassword, privProtocol, privPassword string) (string, float64, error) {
 	translatedOid := TranslateOID(oidStr)
+	if !isValidNumericOID(translatedOid) {
+		return "0", 0, fmt.Errorf("%w: OID %q could not be resolved by MIBs to a numeric format", ErrSNMPInvalidOID, oidStr)
+	}
 
 	params := setupSNMPParams(ctx, ip, community, version, timeoutMs,
 		username, securityLevel, authProtocol, authPassword, privProtocol, privPassword)
@@ -308,14 +355,21 @@ func SolveSNMPQuery(ctx context.Context, ip, community, version string, timeoutM
 	}
 
 	pdu := result.Variables[0]
-	strVal, floatVal := decodeSNMPPDU(pdu)
-	return strVal, floatVal, nil
+	if isSNMPExceptionType(pdu.Type) {
+		return "0", 0, fmt.Errorf("%w: OID %s (%v)", ErrSNMPObjectNotFound, translatedOid, pdu.Type)
+	}
+
+	strVal, floatVal, err := decodeSNMPPDU(pdu)
+	return strVal, floatVal, err
 }
 
 // SolveSNMPWalk performs an SNMP Walk (or BulkWalk) and returns all results joined by a semicolon.
 func SolveSNMPWalk(ctx context.Context, ip, community, version string, timeoutMs int, oidStr string,
 	username, securityLevel, authProtocol, authPassword, privProtocol, privPassword string) (string, error) {
 	translatedOid := TranslateOID(oidStr)
+	if !isValidNumericOID(translatedOid) {
+		return "", fmt.Errorf("%w: OID %q could not be resolved by MIBs to a numeric format", ErrSNMPInvalidOID, oidStr)
+	}
 
 	params := setupSNMPParams(ctx, ip, community, version, timeoutMs,
 		username, securityLevel, authProtocol, authPassword, privProtocol, privPassword)
@@ -332,7 +386,7 @@ func SolveSNMPWalk(ctx context.Context, ip, community, version string, timeoutMs
 
 	var results []string
 	walkFunc := func(pdu gosnmp.SnmpPDU) error {
-		strVal, _ := decodeSNMPPDU(pdu)
+		strVal, _, _ := decodeSNMPPDU(pdu)
 		results = append(results, strVal)
 		return nil
 	}
@@ -349,7 +403,7 @@ func SolveSNMPWalk(ctx context.Context, ip, community, version string, timeoutMs
 	return strings.Join(results, ";"), nil
 }
 
-func decodeSNMPPDU(pdu gosnmp.SnmpPDU) (string, float64) {
+func decodeSNMPPDU(pdu gosnmp.SnmpPDU) (string, float64, error) {
 	switch pdu.Type {
 	case gosnmp.OctetString:
 		var bytes []byte
@@ -360,13 +414,16 @@ func decodeSNMPPDU(pdu gosnmp.SnmpPDU) (string, float64) {
 		}
 		s := string(bytes)
 		if s == "" {
-			return "0", 0
+			return "0", 0, nil
 		}
-		f, _ := strconv.ParseFloat(s, 64)
-		return s, f
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return s, 0, fmt.Errorf("%w: %q is not a number", ErrSNMPNonNumericValue, s)
+		}
+		return s, f, nil
 	case gosnmp.Integer, gosnmp.Counter32, gosnmp.Gauge32, gosnmp.TimeTicks:
 		val := gosnmp.ToBigInt(pdu.Value).Int64()
-		return strconv.FormatInt(val, 10), float64(val)
+		return strconv.FormatInt(val, 10), float64(val), nil
 	case gosnmp.Counter64:
 		// gosnmp returns Counter64 value as uint64
 		var val uint64
@@ -375,10 +432,13 @@ func decodeSNMPPDU(pdu gosnmp.SnmpPDU) (string, float64) {
 		} else {
 			val = uint64(gosnmp.ToBigInt(pdu.Value).Int64())
 		}
-		return strconv.FormatUint(val, 10), float64(val)
+		return strconv.FormatUint(val, 10), float64(val), nil
 	default:
 		valStr := fmt.Sprintf("%v", pdu.Value)
-		f, _ := strconv.ParseFloat(valStr, 64)
-		return valStr, f
+		f, err := strconv.ParseFloat(valStr, 64)
+		if err != nil {
+			return valStr, 0, fmt.Errorf("%w: %q", ErrSNMPNonNumericValue, valStr)
+		}
+		return valStr, f, nil
 	}
 }
