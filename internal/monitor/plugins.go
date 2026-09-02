@@ -1019,7 +1019,7 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 			cert, err = tls.X509KeyPair(certPEM, keyPEM)
 
 		} else {
-			cert, err := tls.LoadX509KeyPair(sslCert, sslKey)
+			cert, err = tls.LoadX509KeyPair(sslCert, sslKey)
 		}
 
 		if err != nil {
