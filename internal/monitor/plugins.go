@@ -1015,7 +1015,7 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 				return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
 			}
 
-			keyPEM := pem.EncodeToMemory(&pem.Block{Type: block.Type, Bytes: decryptedKey})
+			keyPEM = pem.EncodeToMemory(&pem.Block{Type: block.Type, Bytes: decryptedKey})
 			cert, err = tls.X509KeyPair(certPEM, keyPEM)
 
 		} else {
