@@ -130,6 +130,7 @@ var PluginsRegistry = map[string]*PluginDef{
 			{Name: "ssl_ca_file", Type: "string", Default: "none", Description: "Path to CA certificate file for SSL verification"},
 			{Name: "ssl_cert", Type: "string", Default: "none", Description: "Path to SSL client certificate"},
 			{Name: "ssl_key", Type: "string", Default: "none", Description: "Path to SSL client private key"},
+			{Name: "ssl_key_pass", Type: "string", Default: "none", Description: "Password for SSL client private key"},
 			{Name: "timeout_ms", Type: "int", Default: "sensor's timeout", Description: "Request timeout in milliseconds"},
 		},
 	},
@@ -897,6 +898,7 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 	sslCAFile := getStringParam(m.Params, "ssl_ca_file", "")
 	sslCert := getStringParam(m.Params, "ssl_cert", "")
 	sslKey := getStringParam(m.Params, "ssl_key", "")
+	sslKeyPass := getStringParam(m.Params, "ssl_key_pass", "")
 
 	timeoutMs := getIntParam(m.Params, "timeout_ms", getIntParam(m.Params, "timeout", ss.Sensor.Timeout))
 	if timeoutMs < 100 && timeoutMs > 0 {
@@ -988,7 +990,38 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 		if sslCert == "" || sslKey == "" {
 			return "0", fmt.Errorf("both ssl_cert and ssl_key must be specified together")
 		}
-		cert, err := tls.LoadX509KeyPair(sslCert, sslKey)
+
+		var cert tls.Certificate
+		var err error
+
+		if sslKeyPass != "" {
+			certPEM, err := os.ReadFile(sslCert)
+			if err != nil {
+				return "0", fmt.Errorf("failed to read ssl_cert '%s': %w", sslCert, err)
+			}
+
+			keyPEM, err := os.ReadFile(sslKey)
+			if err != nil {
+				return "0", fmt.Errorf("failed to read ssl_key '%s': %w", sslKey, err)
+			}
+
+			block, _ := pem.Decode(keyPEM)
+			if block == nil {
+				return "0", fmt.Errorf("failed to decode PEM block from ssl_key '%s'", sslKey)
+			}
+
+			decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
+			if err != nil {
+				return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
+			}
+
+			keyPEM := pem.EncodeToMemory(&pem.Block{Type: block.Type, Bytes: decryptedKey})
+			cert, err = tls.X509KeyPair(certPEM, keyPEM)
+
+		} else {
+			cert, err := tls.LoadX509KeyPair(sslCert, sslKey)
+		}
+
 		if err != nil {
 			return "0", fmt.Errorf("failed to load SSL keypair (cert: '%s', key: '%s'): %w", sslCert, sslKey, err)
 		}
