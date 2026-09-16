@@ -24,6 +24,7 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
+	"github.com/youmark/pkcs8"
 )
 
 // PluginFunc defines the signature of a native plugin.
@@ -914,6 +915,7 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 	}
 
 	var loadedCACerts []*x509.Certificate
+	
 	if sslCAFile != "" {
 		caCertPool, err := x509.SystemCertPool()
 		if err != nil || caCertPool == nil {
@@ -991,41 +993,100 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 			return "0", fmt.Errorf("both ssl_cert and ssl_key must be specified together")
 		}
 
-		var cert tls.Certificate
-		var err error
+    certPEM, err := os.ReadFile(sslCert)
+    if err != nil {
+      return "0", fmt.Errorf("failed to read ssl_cert '%s': %w", sslCert, err)
+    }
 
-		if sslKeyPass != "" {
-			certPEM, err := os.ReadFile(sslCert)
-			if err != nil {
-				return "0", fmt.Errorf("failed to read ssl_cert '%s': %w", sslCert, err)
+    keyPEM, err := os.ReadFile(sslKey)
+    if err != nil {
+      return "0", fmt.Errorf("failed to read ssl_key '%s': %w", sslKey, err)
+    }
+
+    block, _ := pem.Decode(keyPEM)
+    if block == nil {
+      return "0", fmt.Errorf("failed to decode PEM block from ssl_key '%s'", sslKey)
+    }
+
+    var privateKey interface{}
+
+    switch block.Type {
+    case "ENCRYPTED PRIVATE KEY":
+			if sslKeyPass == "" {
+				return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
 			}
 
-			keyPEM, err := os.ReadFile(sslKey)
-			if err != nil {
-				return "0", fmt.Errorf("failed to read ssl_key '%s': %w", sslKey, err)
-			}
-
-			block, _ := pem.Decode(keyPEM)
-			if block == nil {
-				return "0", fmt.Errorf("failed to decode PEM block from ssl_key '%s'", sslKey)
-			}
-
-			decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
+			privateKey, err = pkcs8.ParsePKCS8PrivateKey(block.Bytes, []byte(sslKeyPass))
 			if err != nil {
 				return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
 			}
 
-			keyPEM = pem.EncodeToMemory(&pem.Block{Type: block.Type, Bytes: decryptedKey})
-			cert, err = tls.X509KeyPair(certPEM, keyPEM)
+    case "PRIVATE KEY":
+			privateKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+			if err != nil {
+				return "0", fmt.Errorf("failed to parse PKCS#8 SSL key '%s': %w", sslKey, err)
+			}
 
-		} else {
-			cert, err = tls.LoadX509KeyPair(sslCert, sslKey)
-		}
+    case "RSA PRIVATE KEY":
+			if x509.IsEncryptedPEMBlock(block) {
+				if sslKeyPass == "" {
+					return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
+				}
 
-		if err != nil {
+				decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
+				if err != nil {
+					return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
+				}
+
+				privateKey, err = x509.ParsePKCS1PrivateKey(decryptedKey)
+			} else {
+				privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+			}
+
+			if err != nil {
+				return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
+			}
+
+    case "EC PRIVATE KEY":
+			if x509.IsEncryptedPEMBlock(block) {
+				if sslKeyPass == "" {
+					return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
+				}
+
+				decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
+				if err != nil {
+					return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
+				}
+
+				privateKey, err = x509.ParseECPrivateKey(decryptedKey)
+			} else {
+				privateKey, err = x509.ParseECPrivateKey(block.Bytes)
+			}
+
+			if err != nil {
+				return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
+			}
+
+    default:
+      return "0", fmt.Errorf("unsupported private key format '%s' in '%s'", block.Type, sslKey)
+    }
+
+    keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+    if err != nil {
+      return "0", fmt.Errorf("failed to normalize SSL private key '%s': %w", sslKey, err)
+    }
+
+    keyPEM = pem.EncodeToMemory(&pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: keyDER,
+    })
+
+    cert, err := tls.X509KeyPair(certPEM, keyPEM)
+    if err != nil {
 			return "0", fmt.Errorf("failed to load SSL keypair (cert: '%s', key: '%s'): %w", sslCert, sslKey, err)
-		}
-		tlsConfig.Certificates = []tls.Certificate{cert}
+    }
+
+    tlsConfig.Certificates = []tls.Certificate{cert}
 	}
 
 	tr := &http.Transport{
