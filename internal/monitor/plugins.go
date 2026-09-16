@@ -1039,12 +1039,14 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 				}
 
 				privateKey, err = x509.ParsePKCS1PrivateKey(decryptedKey)
+				if err != nil {
+					return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
+				}
 			} else {
 				privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-			}
-
-			if err != nil {
-				return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
+				if err != nil {
+					return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
+				}
 			}
 
     case "EC PRIVATE KEY":
@@ -1059,12 +1061,14 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 				}
 
 				privateKey, err = x509.ParseECPrivateKey(decryptedKey)
+				if err != nil {
+					return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
+				}
 			} else {
 				privateKey, err = x509.ParseECPrivateKey(block.Bytes)
-			}
-
-			if err != nil {
-				return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
+				if err != nil {
+					return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
+				}
 			}
 
     default:
