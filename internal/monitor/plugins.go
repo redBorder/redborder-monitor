@@ -1028,47 +1028,15 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 			}
 
     case "RSA PRIVATE KEY":
-			if x509.IsEncryptedPEMBlock(block) {
-				if sslKeyPass == "" {
-					return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
-				}
-
-				decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
-				if err != nil {
-					return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
-				}
-
-				privateKey, err = x509.ParsePKCS1PrivateKey(decryptedKey)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
-				}
-			} else {
-				privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
-				}
+			privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+			if err != nil {
+				return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
 			}
 
     case "EC PRIVATE KEY":
-			if x509.IsEncryptedPEMBlock(block) {
-				if sslKeyPass == "" {
-					return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
-				}
-
-				decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
-				if err != nil {
-					return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
-				}
-
-				privateKey, err = x509.ParseECPrivateKey(decryptedKey)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
-				}
-			} else {
-				privateKey, err = x509.ParseECPrivateKey(block.Bytes)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
-				}
+			privateKey, err = x509.ParseECPrivateKey(block.Bytes)
+			if err != nil {
+				return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
 			}
 
     default:
