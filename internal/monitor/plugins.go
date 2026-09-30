@@ -18,6 +18,7 @@ import (
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 )
@@ -143,11 +144,13 @@ func getIntParam(params map[string]interface{}, key string, def int) int {
 
 // 1. Ping / Fping Plugin
 // Params:
-//   "host" (string): target host (defaults to sensor IP)
-//   "count" (int): number of pings (defaults to 3)
-//   "interval_ms" (int): interval between pings (defaults to 100)
-//   "timeout_ms" (int): total timeout (defaults to sensor timeout)
-//   "metric" (string): "packet_loss" or "latency" / "rtt" (defaults to "packet_loss")
+//
+//	"host" (string): target host (defaults to sensor IP)
+//	"count" (int): number of pings (defaults to 3)
+//	"interval_ms" (int): interval between pings (defaults to 100)
+//	"timeout_ms" (int): total timeout (defaults to sensor timeout)
+//	"metric" (string): "packet_loss" or "latency" / "rtt" (defaults to "packet_loss")
+//
 // Returns: percentage of packets lost (float string, e.g. "0.0") or average RTT in ms (e.g. "2.5")
 func PingPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error) {
 	host := getStringParam(m.Params, "host", ss.Sensor.SensorIP)
@@ -217,7 +220,8 @@ func PingPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 
 // 2. SNMP Plugin (Single OID GET query wrapper)
 // Params:
-//   "oid" (string): OID to query
+//
+//	"oid" (string): OID to query
 func SNMPPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error) {
 	oid := getStringParam(m.Params, "oid", m.Oid)
 	if oid == "" {
@@ -243,7 +247,8 @@ func SNMPPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 
 // 3. SNMP Walk Plugin
 // Params:
-//   "oid" (string): OID to walk
+//
+//	"oid" (string): OID to walk
 func SNMPWalkPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error) {
 	oid := getStringParam(m.Params, "oid", m.Oid)
 	if oid == "" {
@@ -444,7 +449,7 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			return string(props.Summary.Runtime.ConnectionState), nil
 		case "cpu_usage":
 			overallCpuUsage := int64(props.Summary.QuickStats.OverallCpuUsage)
-			
+
 			var cpuMhz, numCores int64
 			if props.Summary.Hardware != nil {
 				cpuMhz = int64(props.Summary.Hardware.CpuMhz)
@@ -453,7 +458,7 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			if cpuMhz == 0 || numCores == 0 {
 				return "0", fmt.Errorf("host CPU specs (CpuMhz=%d, NumCpuCores=%d) are missing or 0", cpuMhz, numCores)
 			}
-			
+
 			totalCapacityMhz := cpuMhz * numCores
 			percent := (float64(overallCpuUsage) / float64(totalCapacityMhz)) * 100
 			return fmt.Sprintf("%.2f", percent), nil
@@ -462,7 +467,7 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			return strconv.FormatInt(overallCpuUsage, 10), nil
 		case "memory_usage":
 			overallMemoryUsage := int64(props.Summary.QuickStats.OverallMemoryUsage)
-			
+
 			var totalMemoryBytes int64
 			if props.Summary.Hardware != nil {
 				totalMemoryBytes = props.Summary.Hardware.MemorySize
@@ -470,7 +475,7 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			if totalMemoryBytes == 0 {
 				return "0", fmt.Errorf("host memory size is missing or 0")
 			}
-			
+
 			totalMemoryMb := float64(totalMemoryBytes) / (1024 * 1024)
 			percent := (float64(overallMemoryUsage) / totalMemoryMb) * 100
 			return fmt.Sprintf("%.2f", percent), nil
@@ -514,7 +519,38 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			var lookupErr error
 			vm, lookupErr = finder.VirtualMachine(ctx, target)
 			if lookupErr != nil {
-				return "0", fmt.Errorf("vm '%s' not found: %v", target, lookupErr)
+				vms, listErr := finder.VirtualMachineList(ctx, fmt.Sprintf(".../%s", target))
+				if listErr == nil && len(vms) > 0 {
+					vm = vms[0]
+				} else {
+					finder.SetDatacenter(nil)
+					vmsAll, allErr := finder.VirtualMachineList(ctx, fmt.Sprintf(".../%s", target))
+					if allErr == nil && len(vmsAll) > 0 {
+						vm = vmsAll[0]
+					} else {
+						if clientWrapper.client != nil && clientWrapper.client.Client != nil && clientWrapper.client.ServiceContent.ViewManager != nil {
+							vManager := view.NewManager(clientWrapper.client.Client)
+							cView, cvErr := vManager.CreateContainerView(ctx, clientWrapper.client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
+							if cvErr == nil {
+								defer cView.Destroy(ctx)
+								var moVMs []mo.VirtualMachine
+								if errRetrieve := cView.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &moVMs); errRetrieve == nil {
+									targetLower := strings.ToLower(target)
+									for _, moVM := range moVMs {
+										vmNameLower := strings.ToLower(moVM.Name)
+										if vmNameLower == targetLower || moVM.Self.Value == target || strings.Contains(vmNameLower, targetLower) {
+											vm = object.NewVirtualMachine(clientWrapper.client.Client, moVM.Self)
+											break
+										}
+									}
+								}
+							}
+						}
+						if vm == nil {
+							return "0", fmt.Errorf("vm '%s' not found: %v", target, lookupErr)
+						}
+					}
+				}
 			}
 			clientWrapper.mu.Lock()
 			clientWrapper.resolvedVMs[target] = vm
@@ -564,7 +600,7 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			if hostCpuMhz == 0 {
 				return "0", fmt.Errorf("VM host CPU frequency (CpuMhz) is missing or 0")
 			}
-			
+
 			totalMhz := numCpu * hostCpuMhz
 			percent := (float64(overallCpuUsage) / float64(totalMhz)) * 100
 			return fmt.Sprintf("%.2f", percent), nil
@@ -629,10 +665,11 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 
 // 5. Redfish Plugin (Native HTTP API Query)
 // Params:
-//   "path" (string): REST endpoint (e.g. "/redfish/v1/Chassis/System.Embedded.1/Thermal")
-//   "json_path" (string): dot-notation path to extract (e.g. "Temperatures.0.ReadingCelsius")
-//   "username" (string): credential
-//   "password" (string): credential
+//
+//	"path" (string): REST endpoint (e.g. "/redfish/v1/Chassis/System.Embedded.1/Thermal")
+//	"json_path" (string): dot-notation path to extract (e.g. "Temperatures.0.ReadingCelsius")
+//	"username" (string): credential
+//	"password" (string): credential
 var redfishClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &http.Transport{
@@ -708,11 +745,12 @@ func RedfishPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, err
 
 // 6. IPMI Plugin (Native IPMI over LAN)
 // Params:
-//   "command" (string): IPMI command, e.g., "sdr", "chassis_status", "power_status"
-//   "port" (int): IPMI port (defaults to 623)
-//   "username" (string): credential
-//   "password" (string): credential
-//   "sensor_name" (string): specific sensor to query (only for "sdr" / "sensors")
+//
+//	"command" (string): IPMI command, e.g., "sdr", "chassis_status", "power_status"
+//	"port" (int): IPMI port (defaults to 623)
+//	"username" (string): credential
+//	"password" (string): credential
+//	"sensor_name" (string): specific sensor to query (only for "sdr" / "sensors")
 func getIPMIClient(ctx context.Context, host string, port int, username, password string) (*ipmi.Client, error) {
 	client, err := ipmi.NewClient(host, port, username, password)
 	if err != nil {
