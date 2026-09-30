@@ -78,6 +78,7 @@ var PluginsRegistry = map[string]*PluginDef{
 			{Name: "username", Type: "string", Default: "parent sensor's govc_username", Description: "VMware Basic Auth username"},
 			{Name: "password", Type: "string", Default: "parent sensor's govc_password", Description: "VMware Basic Auth password"},
 			{Name: "target", Type: "string", Default: "parent sensor's name", Description: "Name of the target VM or ESXi host"},
+			{Name: "target_moid", Type: "string", Default: "none", Description: "MOID of the target VM (e.g. \"vm-101\"). If provided, skips inventory search."},
 			{Name: "target_type", Type: "string", Default: "\"vm\"", Description: "Type of target: \"vm\" or \"host\""},
 			{Name: "datacenter", Type: "string", Default: "none", Description: "Name of the target VMware datacenter (optional)"},
 			{Name: "disk_path", Type: "string", Default: "none", Description: "Mount path/drive letter for VM disk queries (optional)"},
@@ -346,6 +347,7 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 	username := getStringParam(m.Params, "username", ss.Sensor.GovcUsername)
 	password := getStringParam(m.Params, "password", ss.Sensor.GovcPassword)
 	target := getStringParam(m.Params, "target", "")
+	targetMOID := getStringParam(m.Params, "target_moid", getStringParam(m.Params, "moid", ss.Sensor.SensorMoid))
 	metric := getStringParam(m.Params, "metric", "power_state")
 	targetType := getStringParam(m.Params, "target_type", "vm")
 	datacenter := getStringParam(m.Params, "datacenter", "")
@@ -510,50 +512,62 @@ func govcPluginInternal(ctx context.Context, ss *SafeSensor, m *Monitor) (string
 			return "0", fmt.Errorf("unknown host metric '%s'", metric)
 		}
 	} else {
+		cacheKey := target
+		if targetMOID != "" {
+			cacheKey = targetMOID
+		}
+
 		var vm *object.VirtualMachine
 		clientWrapper.mu.RLock()
-		vm = clientWrapper.resolvedVMs[target]
+		vm = clientWrapper.resolvedVMs[cacheKey]
 		clientWrapper.mu.RUnlock()
 
 		if vm == nil {
-			var lookupErr error
-			vm, lookupErr = finder.VirtualMachine(ctx, target)
-			if lookupErr != nil {
-				vms, listErr := finder.VirtualMachineList(ctx, fmt.Sprintf(".../%s", target))
-				if listErr == nil && len(vms) > 0 {
-					vm = vms[0]
-				} else {
-					finder.SetDatacenter(nil)
-					vmsAll, allErr := finder.VirtualMachineList(ctx, fmt.Sprintf(".../%s", target))
-					if allErr == nil && len(vmsAll) > 0 {
-						vm = vmsAll[0]
+			if targetMOID != "" && clientWrapper.client != nil && clientWrapper.client.Client != nil {
+				vm = object.NewVirtualMachine(clientWrapper.client.Client, types.ManagedObjectReference{
+					Type:  "VirtualMachine",
+					Value: targetMOID,
+				})
+			} else {
+				var lookupErr error
+				vm, lookupErr = finder.VirtualMachine(ctx, target)
+				if lookupErr != nil {
+					vms, listErr := finder.VirtualMachineList(ctx, fmt.Sprintf(".../%s", target))
+					if listErr == nil && len(vms) > 0 {
+						vm = vms[0]
 					} else {
-						if clientWrapper.client != nil && clientWrapper.client.Client != nil && clientWrapper.client.ServiceContent.ViewManager != nil {
-							vManager := view.NewManager(clientWrapper.client.Client)
-							cView, cvErr := vManager.CreateContainerView(ctx, clientWrapper.client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
-							if cvErr == nil {
-								defer cView.Destroy(ctx)
-								var moVMs []mo.VirtualMachine
-								if errRetrieve := cView.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &moVMs); errRetrieve == nil {
-									targetLower := strings.ToLower(target)
-									for _, moVM := range moVMs {
-										vmNameLower := strings.ToLower(moVM.Name)
-										if vmNameLower == targetLower || moVM.Self.Value == target || strings.Contains(vmNameLower, targetLower) {
-											vm = object.NewVirtualMachine(clientWrapper.client.Client, moVM.Self)
-											break
+						finder.SetDatacenter(nil)
+						vmsAll, allErr := finder.VirtualMachineList(ctx, fmt.Sprintf(".../%s", target))
+						if allErr == nil && len(vmsAll) > 0 {
+							vm = vmsAll[0]
+						} else {
+							if clientWrapper.client != nil && clientWrapper.client.Client != nil && clientWrapper.client.ServiceContent.ViewManager != nil {
+								vManager := view.NewManager(clientWrapper.client.Client)
+								cView, cvErr := vManager.CreateContainerView(ctx, clientWrapper.client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
+								if cvErr == nil {
+									defer func() { _ = cView.Destroy(ctx) }()
+									var moVMs []mo.VirtualMachine
+									if errRetrieve := cView.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &moVMs); errRetrieve == nil {
+										targetLower := strings.ToLower(target)
+										for _, moVM := range moVMs {
+											vmNameLower := strings.ToLower(moVM.Name)
+											if vmNameLower == targetLower || moVM.Self.Value == target || strings.Contains(vmNameLower, targetLower) {
+												vm = object.NewVirtualMachine(clientWrapper.client.Client, moVM.Self)
+												break
+											}
 										}
 									}
 								}
 							}
-						}
-						if vm == nil {
-							return "0", fmt.Errorf("vm '%s' not found: %v", target, lookupErr)
+							if vm == nil {
+								return "0", fmt.Errorf("vm '%s' not found: %v", target, lookupErr)
+							}
 						}
 					}
 				}
 			}
 			clientWrapper.mu.Lock()
-			clientWrapper.resolvedVMs[target] = vm
+			clientWrapper.resolvedVMs[cacheKey] = vm
 			clientWrapper.mu.Unlock()
 		}
 
