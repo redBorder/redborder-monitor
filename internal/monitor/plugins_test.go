@@ -2,10 +2,12 @@ package monitor
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -327,6 +329,184 @@ func TestGovcPlugin_FallbackConnectionRefused(t *testing.T) {
 	expectedErrPart := "failed to connect to VMware"
 	if !strings.Contains(err.Error(), expectedErrPart) {
 		t.Errorf("expected error containing %q, got %q", expectedErrPart, err.Error())
+	}
+}
+
+func TestHttpPlugin_Success(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Custom-Header") != "CustomValue" {
+			http.Error(w, "missing custom header", http.StatusBadRequest)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "admin" || pass != "secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("Hello HTTP Plugin"))
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	ss := &SafeSensor{
+		Sensor: &Sensor{
+			SensorName: "http-sensor",
+			Timeout:    5000,
+		},
+	}
+
+	// 1. Test status code extraction with headers and basic auth
+	m := &Monitor{
+		Name:   "http_status_test",
+		Plugin: "http_agent",
+		Params: map[string]interface{}{
+			"url":             ts.URL,
+			"method":          "GET",
+			"expected_status": 200,
+			"username":        "admin",
+			"password":        "secret",
+			"headers": map[string]interface{}{
+				"X-Custom-Header": "CustomValue",
+			},
+		},
+	}
+
+	val, err := HttpPlugin(ctx, ss, m)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "200" {
+		t.Errorf("expected status '200', got %q", val)
+	}
+
+	// 2. Test response time / latency metric
+	mLatency := &Monitor{
+		Name:   "http_latency_test",
+		Plugin: "http_agent",
+		Params: map[string]interface{}{
+			"url":      ts.URL,
+			"metric":   "latency",
+			"username": "admin",
+			"password": "secret",
+			"headers": map[string]interface{}{
+				"X-Custom-Header": "CustomValue",
+			},
+		},
+	}
+	valLat, err := HttpPlugin(ctx, ss, mLatency)
+	if err != nil {
+		t.Fatalf("unexpected latency error: %v", err)
+	}
+	if valLat == "" || valLat == "0.00" {
+		t.Logf("got latency %s", valLat)
+	}
+
+	// 3. Test body extraction
+	mBody := &Monitor{
+		Name:   "http_body_test",
+		Plugin: "http_agent",
+		Params: map[string]interface{}{
+			"url":      ts.URL,
+			"metric":   "body",
+			"username": "admin",
+			"password": "secret",
+			"headers": map[string]interface{}{
+				"X-Custom-Header": "CustomValue",
+			},
+		},
+	}
+	valBody, err := HttpPlugin(ctx, ss, mBody)
+	if err != nil {
+		t.Fatalf("unexpected body error: %v", err)
+	}
+	if valBody != "Hello HTTP Plugin" {
+		t.Errorf("expected body 'Hello HTTP Plugin', got %q", valBody)
+	}
+}
+
+func TestHttpPlugin_StatusMismatch(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	ss := &SafeSensor{
+		Sensor: &Sensor{
+			SensorName: "http-sensor",
+			Timeout:    5000,
+		},
+	}
+
+	m := &Monitor{
+		Name:   "http_mismatch_test",
+		Plugin: "http_agent",
+		Params: map[string]interface{}{
+			"url":             ts.URL,
+			"expected_status": 200,
+		},
+	}
+
+	val, err := HttpPlugin(ctx, ss, m)
+	if err == nil {
+		t.Fatal("expected error on status mismatch (404 != 200), got nil")
+	}
+	if val != "404" {
+		t.Errorf("expected status '404', got %q", val)
+	}
+}
+
+func TestHttpPlugin_WithUserCertificates(t *testing.T) {
+	certFile := "testdata/server.crt"
+	keyFile := "testdata/server.key"
+	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		certFile = "internal/monitor/testdata/server.crt"
+		keyFile = "internal/monitor/testdata/server.key"
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatalf("failed to load user server keypair: %v", err)
+	}
+
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("User Cert TLS OK"))
+	}))
+	ts.TLS = &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	ts.StartTLS()
+	defer ts.Close()
+
+	ctx := context.Background()
+	ss := &SafeSensor{
+		Sensor: &Sensor{
+			SensorName: "tls-sensor-user",
+			Timeout:    5000,
+		},
+	}
+
+	m := &Monitor{
+		Name:   "http_user_cert_test",
+		Plugin: "http_agent",
+		Params: map[string]interface{}{
+			"url":             ts.URL,
+			"expected_status": 200,
+			"ssl_verify_peer": true,
+			"ssl_ca_file":     certFile,
+			"ssl_cert":        certFile,
+			"ssl_key":         keyFile,
+		},
+	}
+
+	val, err := HttpPlugin(ctx, ss, m)
+	if err != nil {
+		t.Fatalf("HttpPlugin failed with user certs: %v", err)
+	}
+	if val != "200" {
+		t.Errorf("expected status '200', got %q", val)
 	}
 }
 
