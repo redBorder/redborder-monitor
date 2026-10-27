@@ -9,7 +9,7 @@ Designed for high-concurrency environments, it schedules and executes polls asyn
 ## Key Features
 
 * **Dynamic SNMP & MIB Loading**: Dynamically loads and parses standard or custom SNMP MIB text files at startup or on config reload. Textual OIDs (e.g. `IF-MIB::ifIndex.1` or `laLoad.1`) are resolved to numeric OIDs automatically without Net-SNMP dependencies.
-* **Native In-Memory Plugins**: Employs statically-compiled, high-performance plugins (`ping`, `snmp_walk`, `govc` using govmomi SDK, `redfish` REST, `ipmi` over LAN), avoiding process fork overhead.
+* **Native In-Memory Plugins**: Employs statically-compiled, high-performance plugins (`ping`, `snmp_walk`, `snmp_rate` for counter rates, `govc` using govmomi SDK, `redfish` REST, `ipmi` over LAN), avoiding process fork overhead.
 * **Math Expression Evaluator**: Safely evaluates infix math formulas (`op` parameter, e.g. `a + b`, `(x * 100) / y`) and resolves cross-group dependency graphs (using `_gid_<group_id>` syntax).
 * **Vector Splits & Aggregations**: Splits vector telemetry streams via custom delimiters (`split`), handles explicit timestamps (`timestamp:value`), and calculates aggregates (`sum`, `mean`).
 * **Self-Healing Priority Scheduling**: Automatically isolates slow or failing sensors to a low-priority queue to prevent poll starvation, returning them to high priority once they recover.
@@ -197,7 +197,23 @@ Performs an SNMP BulkWalk, returning values concatenated by a semicolon.
 * **Parameters**:
   * `oid` (string, default: monitor's `oid`): Root OID branch.
 
-### 4. `govc`
+### 4. `snmp_rate`
+Reads an SNMP `Counter32`/`Counter64` (e.g. `ifHCInOctets.<ifIndex>`) and publishes its **rate per second** instead of the raw counter, which only grows. The rate is the difference with the previous reading of the same monitor, divided by the seconds between both readings.
+* **Parameters**:
+  * `oid` (string, default: monitor's `oid`): Counter OID.
+  * `multiplier` (float, default: `1`): Factor applied to the rate, e.g. `8` to publish bits/s from an octets counter.
+  * `max_rate` (float, default: `0`): Rates above this value (after `multiplier`) are dropped instead of published, e.g. the link speed. `0` disables the check.
+* **Behaviour**:
+  * The previous reading is kept in memory per sensor (it survives a `SIGHUP` reload, not a restart). The first cycle after start publishes nothing.
+  * A `Counter32` that goes backwards is taken as one wrap (2^32 is added). A `Counter64` that goes backwards is a reset (e.g. device reboot): nothing is published that cycle and counting starts again.
+  * A failed query publishes nothing (no placeholder `0`, which would read as "no traffic") and keeps the previous reading, so the next successful cycle gives the average rate over the gap. It still counts as a sensor failure, like any other query error.
+  * A value that is not a counter (gauge, integer, string) is skipped as "not available".
+* **Example** (interface inbound traffic in bits per second):
+```json
+{"name": "if_in_gi1_0_1", "plugin": "snmp_rate", "params": {"oid": "1.3.6.1.2.1.31.1.1.1.6.10101", "multiplier": 8}, "unit": "bps"}
+```
+
+### 5. `govc`
 Retrieves performance metrics from VMware vCenter or ESXi hypervisors.
 * **Parameters**:
   * `host` (string, default: sensor's IP): vCenter/ESXi API address.
@@ -207,7 +223,7 @@ Retrieves performance metrics from VMware vCenter or ESXi hypervisors.
   * `target_type` (string, default: `"vm"`): Type of target (`"vm"` or `"host"`).
   * `metric` (string, default: `"power_state"`): Metric path (e.g. `cpu_usage`, `memory_usage`, `disk_usage`).
 
-### 5. `redfish`
+### 6. `redfish`
 Polls OOB BMC interfaces (Dell iDRAC, HPE iLO, etc.) using Redfish JSON REST APIs.
 * **Parameters**:
   * `host` (string, default: sensor's IP): BMC IP address.
@@ -216,7 +232,7 @@ Polls OOB BMC interfaces (Dell iDRAC, HPE iLO, etc.) using Redfish JSON REST API
   * `username` (string): BMC login.
   * `password` (string): BMC password.
 
-### 6. `ipmi`
+### 7. `ipmi`
 Queries hardware IPMI SDR tables and chassis status directly over UDP.
 * **Parameters**:
   * `host` (string, default: sensor's IP): BMC IP address.
