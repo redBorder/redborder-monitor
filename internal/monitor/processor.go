@@ -77,6 +77,11 @@ type SafeSensor struct {
 	timeoutCount      int64
 	skippedCount      int64
 	statsMu           sync.RWMutex
+
+	// Previous raw reading of each counter polled by the snmp_rate plugin,
+	// keyed by monitor name and OID (see rate.go).
+	counters   map[string]counterSample
+	countersMu sync.Mutex
 }
 
 func (ss *SafeSensor) IsLowPriority() bool {
@@ -446,6 +451,16 @@ func processPluginMonitor(ctx context.Context, ss *SafeSensor, m *Monitor) (*Mon
 	}
 	out, err := pluginDef.Func(ctx, ss, m)
 	if err != nil {
+		if errors.Is(err, ErrNoSample) {
+			// Nothing to publish this cycle and nothing wrong (e.g. first
+			// reading of a counter): skip silently.
+			return nil, nil
+		}
+		if pluginDef.NoValueOnError {
+			// A placeholder 0 would be read as a real value (e.g. 0 bps
+			// of traffic). Skip this cycle but still report the error.
+			return nil, err
+		}
 		if errors.Is(err, ErrSNMPObjectNotFound) || errors.Is(err, ErrSNMPNonNumericValue) || errors.Is(err, ErrSNMPInvalidOID) {
 			// The agent responded but doesn't expose this OID, returned non-numeric text, or OID is unresolvable.
 			// Don't publish a misleading 0 for it; just skip this monitor this cycle.
