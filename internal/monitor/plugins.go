@@ -39,6 +39,9 @@ type PluginDef struct {
 	Func        PluginFunc
 	Description string
 	Params      []PluginParam
+	// NoValueOnError skips publishing when the plugin fails, instead of
+	// publishing the usual placeholder 0.
+	NoValueOnError bool
 }
 
 // PluginsRegistry registers all available in-memory plugins by name.
@@ -61,6 +64,16 @@ var PluginsRegistry = map[string]*PluginDef{
 		Description: "Queries a single SNMP OID using the sensor's credentials.",
 		Params: []PluginParam{
 			{Name: "oid", Type: "string", Default: "monitor's \"oid\" field", Description: "SNMP Object Identifier"},
+		},
+	},
+	"snmp_rate": {
+		Func:           SNMPRatePlugin,
+		Description:    "Reads an SNMP Counter32/Counter64 and publishes its rate per second (difference with the previous reading). Nothing is published on the first reading, on a counter reset or when the query fails.",
+		NoValueOnError: true,
+		Params: []PluginParam{
+			{Name: "oid", Type: "string", Default: "monitor's \"oid\" field", Description: "Counter OID (e.g. ifHCInOctets.<ifIndex>)"},
+			{Name: "multiplier", Type: "float", Default: "1", Description: "Factor applied to the rate, e.g. 8 to turn octets/s into bits/s"},
+			{Name: "max_rate", Type: "float", Default: "0", Description: "Drop rates above this value (after multiplier), e.g. the link speed; 0 disables the check"},
 		},
 	},
 	"snmp_walk": {
@@ -119,6 +132,25 @@ func getStringParam(params map[string]interface{}, key string, def string) strin
 	if val, ok := params[key]; ok {
 		if s, ok := val.(string); ok {
 			return s
+		}
+	}
+	return def
+}
+
+func getFloatParam(params map[string]interface{}, key string, def float64) float64 {
+	if params == nil {
+		return def
+	}
+	if val, ok := params[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			return v
+		case int:
+			return float64(v)
+		case string:
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return f
+			}
 		}
 	}
 	return def

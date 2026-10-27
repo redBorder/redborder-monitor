@@ -327,9 +327,39 @@ func setupSNMPParams(ctx context.Context, ip, community, version string, timeout
 // SolveSNMPQuery performs a standard SNMP GET query using gosnmp.
 func SolveSNMPQuery(ctx context.Context, ip, community, version string, timeoutMs int, oidStr string,
 	username, securityLevel, authProtocol, authPassword, privProtocol, privPassword string) (string, float64, error) {
+	pdu, err := getSNMPPDU(ctx, ip, community, version, timeoutMs, oidStr,
+		username, securityLevel, authProtocol, authPassword, privProtocol, privPassword)
+	if err != nil {
+		return "0", 0, err
+	}
+
+	strVal, floatVal, err := decodeSNMPPDU(pdu)
+	return strVal, floatVal, err
+}
+
+// SolveSNMPCounter performs an SNMP GET of a single counter OID and returns
+// its raw value together with its width in bits (32 for Counter32, 64 for
+// Counter64), which callers need to tell a counter wrap from a reset.
+// A value of any other type is rejected with ErrSNMPNonNumericValue: a rate
+// computed from a gauge or a string would be meaningless.
+func SolveSNMPCounter(ctx context.Context, ip, community, version string, timeoutMs int, oidStr string,
+	username, securityLevel, authProtocol, authPassword, privProtocol, privPassword string) (uint64, int, error) {
+	pdu, err := getSNMPPDU(ctx, ip, community, version, timeoutMs, oidStr,
+		username, securityLevel, authProtocol, authPassword, privProtocol, privPassword)
+	if err != nil {
+		return 0, 0, err
+	}
+	return decodeSNMPCounter(pdu)
+}
+
+// getSNMPPDU performs an SNMP GET of a single OID and returns its varbind.
+// SNMP exception varbinds (noSuchObject, noSuchInstance, endOfMibView) are
+// returned as ErrSNMPObjectNotFound.
+func getSNMPPDU(ctx context.Context, ip, community, version string, timeoutMs int, oidStr string,
+	username, securityLevel, authProtocol, authPassword, privProtocol, privPassword string) (gosnmp.SnmpPDU, error) {
 	translatedOid := TranslateOID(oidStr)
 	if !isValidNumericOID(translatedOid) {
-		return "0", 0, fmt.Errorf("%w: OID %q could not be resolved by MIBs to a numeric format", ErrSNMPInvalidOID, oidStr)
+		return gosnmp.SnmpPDU{}, fmt.Errorf("%w: OID %q could not be resolved by MIBs to a numeric format", ErrSNMPInvalidOID, oidStr)
 	}
 
 	params := setupSNMPParams(ctx, ip, community, version, timeoutMs,
@@ -337,7 +367,7 @@ func SolveSNMPQuery(ctx context.Context, ip, community, version string, timeoutM
 
 	err := params.Connect()
 	if err != nil {
-		return "0", 0, err
+		return gosnmp.SnmpPDU{}, err
 	}
 	defer func() {
 		if params.Conn != nil {
@@ -347,20 +377,33 @@ func SolveSNMPQuery(ctx context.Context, ip, community, version string, timeoutM
 
 	result, err := params.Get([]string{translatedOid})
 	if err != nil {
-		return "0", 0, err
+		return gosnmp.SnmpPDU{}, err
 	}
 
 	if len(result.Variables) == 0 {
-		return "0", 0, fmt.Errorf("no variables returned in SNMP response")
+		return gosnmp.SnmpPDU{}, fmt.Errorf("no variables returned in SNMP response")
 	}
 
 	pdu := result.Variables[0]
 	if isSNMPExceptionType(pdu.Type) {
-		return "0", 0, fmt.Errorf("%w: OID %s (%v)", ErrSNMPObjectNotFound, translatedOid, pdu.Type)
+		return gosnmp.SnmpPDU{}, fmt.Errorf("%w: OID %s (%v)", ErrSNMPObjectNotFound, translatedOid, pdu.Type)
 	}
+	return pdu, nil
+}
 
-	strVal, floatVal, err := decodeSNMPPDU(pdu)
-	return strVal, floatVal, err
+// decodeSNMPCounter extracts the value and width of a Counter32/Counter64 varbind.
+func decodeSNMPCounter(pdu gosnmp.SnmpPDU) (uint64, int, error) {
+	switch pdu.Type {
+	case gosnmp.Counter32:
+		return gosnmp.ToBigInt(pdu.Value).Uint64(), 32, nil
+	case gosnmp.Counter64:
+		if u, ok := pdu.Value.(uint64); ok {
+			return u, 64, nil
+		}
+		return gosnmp.ToBigInt(pdu.Value).Uint64(), 64, nil
+	default:
+		return 0, 0, fmt.Errorf("%w: OID %s is %v, not a Counter32/Counter64", ErrSNMPNonNumericValue, pdu.Name, pdu.Type)
+	}
 }
 
 // SolveSNMPWalk performs an SNMP Walk (or BulkWalk) and returns all results joined by a semicolon.
