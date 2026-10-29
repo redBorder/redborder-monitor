@@ -38,6 +38,7 @@ func PrintInfo(w io.Writer) {
 	fmt.Fprintln(w, "   - http_verbose (int): HTTP verbose logging (0/1)")
 	fmt.Fprintln(w, "   - http_insecure (int): HTTP insecure TLS skip verification (0/1)")
 	fmt.Fprintln(w, "   - rb_http_max_messages (int): Max messages per HTTP post batch")
+	fmt.Fprintln(w, "   - rb_http_flush_timer (int, default 1): Max seconds before flushing buffered HTTP batch")
 	fmt.Fprintln(w, "   - rb_http_mode (string): HTTP post format/mode")
 	fmt.Fprintln(w, "   - ipc_socket_path (string): Unix socket path for IPC daemon status (default \"/var/run/redborder-monitor/redborder-monitor.sock\")")
 	fmt.Fprintln(w, "   - enrichment (map): Global static tags to add to all metrics (key-value pairs)")

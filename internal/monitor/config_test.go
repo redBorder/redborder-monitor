@@ -275,3 +275,74 @@ func TestLoadConfig_InvalidFieldType(t *testing.T) {
 		t.Errorf("expected config to be nil, got %v", config)
 	}
 }
+
+func TestLoadConfig_RbHttpFlushTimer(t *testing.T) {
+	testCases := []struct {
+		name          string
+		jsonContent   string
+		expectedTimer int
+	}{
+		{
+			name: "numeric timer",
+			jsonContent: `{
+				"conf": {
+					"rb_http_max_messages": 10,
+					"rb_http_flush_timer": 5
+				}
+			}`,
+			expectedTimer: 5,
+		},
+		{
+			name: "stringified timer",
+			jsonContent: `{
+				"conf": {
+					"rb_http_max_messages": 10,
+					"rb_http_flush_timer": "3"
+				}
+			}`,
+			expectedTimer: 3,
+		},
+		{
+			name: "flush interval alias",
+			jsonContent: `{
+				"conf": {
+					"rb_http_max_messages": 10,
+					"rb_http_flush_interval": 7
+				}
+			}`,
+			expectedTimer: 7,
+		},
+		{
+			name: "omitted timer defaults to 0 in config struct",
+			jsonContent: `{
+				"conf": {
+					"rb_http_max_messages": 10
+				}
+			}`,
+			expectedTimer: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpFile, err := os.CreateTemp("", "test_flush_timer_*.json")
+			if err != nil {
+				t.Fatalf("failed to create temp file: %v", err)
+			}
+			defer os.Remove(tmpFile.Name())
+
+			if _, err := tmpFile.Write([]byte(tc.jsonContent)); err != nil {
+				t.Fatalf("failed to write temp file: %v", err)
+			}
+			tmpFile.Close()
+
+			cfg, err := LoadConfig(tmpFile.Name())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Conf.RbHttpFlushTimer != tc.expectedTimer {
+				t.Errorf("expected RbHttpFlushTimer %d, got %d", tc.expectedTimer, cfg.Conf.RbHttpFlushTimer)
+			}
+		})
+	}
+}
