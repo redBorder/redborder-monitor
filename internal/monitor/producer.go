@@ -37,14 +37,25 @@ type MetricProducer struct {
 	httpClient  *http.Client
 	httpURL     string
 	httpMode    string // "normal" or "deflated"
+
+	httpBatchChan chan Metric
+	httpStopChan  chan struct{}
+	httpDoneChan  chan struct{}
+	batchFlushDur time.Duration
 }
 
 // NewMetricProducer initializes output endpoints based on configuration.
 func NewMetricProducer(config *Config) *MetricProducer {
+	flushDur := 1 * time.Second
+	if config.Conf.RbHttpFlushTimer > 0 {
+		flushDur = time.Duration(config.Conf.RbHttpFlushTimer) * time.Second
+	}
+
 	p := &MetricProducer{
-		config:   config,
-		httpURL:  config.Conf.HttpEndpoint,
-		httpMode: config.Conf.RbHttpMode,
+		config:        config,
+		httpURL:       config.Conf.HttpEndpoint,
+		httpMode:      config.Conf.RbHttpMode,
+		batchFlushDur: flushDur,
 	}
 
 	// Initialize Kafka Writer if broker is specified
@@ -109,6 +120,10 @@ func NewMetricProducer(config *Config) *MetricProducer {
 			Transport: tr,
 			Timeout:   time.Duration(timeout) * time.Second,
 		}
+
+		if config.Conf.RbHttpMaxMessages > 1 {
+			p.startHTTPBatcher(p.httpClient, p.httpURL, p.httpMode, config.Conf.RbHttpMaxMessages)
+		}
 	}
 
 	return p
@@ -146,7 +161,16 @@ func (p *MetricProducer) Produce(metric Metric) {
 
 	// HTTP POST
 	if p.httpClient != nil {
-		go p.sendHTTP(data)
+		if p.httpBatchChan != nil {
+			select {
+			case p.httpBatchChan <- metric:
+			default:
+				IncMetricsFailedHTTP()
+				log.Printf("[WARN] HTTP batch queue full, dropping metric: %s", metric.Monitor)
+			}
+		} else {
+			go p.sendHTTP(data)
+		}
 	}
 }
 
@@ -211,6 +235,156 @@ func (p *MetricProducer) sendHTTP(data []byte) {
 	}
 }
 
+func (p *MetricProducer) sendHTTPBatch(client *http.Client, url, mode string, batch []Metric) {
+	if len(batch) == 0 || client == nil || url == "" {
+		return
+	}
+
+	data, err := json.Marshal(batch)
+	if err != nil {
+		log.Printf("[ERROR] Failed to marshal metric batch: %v", err)
+		for range batch {
+			IncMetricsFailedHTTP()
+		}
+		return
+	}
+
+	var body io.Reader = bytes.NewReader(data)
+	var contentEncoding string
+
+	if strings.ToLower(mode) == "deflated" {
+		var buf bytes.Buffer
+		w, err := flate.NewWriter(&buf, flate.BestCompression)
+		if err == nil {
+			_, _ = w.Write(data)
+			_ = w.Close()
+			body = &buf
+			contentEncoding = "deflate"
+		}
+	} else if strings.ToLower(mode) == "gzip" {
+		var buf bytes.Buffer
+		w := gzip.NewWriter(&buf)
+		_, _ = w.Write(data)
+		_ = w.Close()
+		body = &buf
+		contentEncoding = "gzip"
+	}
+
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create HTTP request: %v", err)
+		for range batch {
+			IncMetricsFailedHTTP()
+		}
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[ERROR] HTTP POST failed: %v", err)
+		for range batch {
+			IncMetricsFailedHTTP()
+		}
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
+		log.Printf("[ERROR] HTTP server returned status: %s", resp.Status)
+		for range batch {
+			IncMetricsFailedHTTP()
+		}
+	} else {
+		for range batch {
+			IncMetricsSentHTTP()
+		}
+	}
+}
+
+func (p *MetricProducer) startHTTPBatcher(client *http.Client, url, mode string, maxBatch int) {
+	if maxBatch <= 1 || client == nil || url == "" {
+		return
+	}
+	flushDur := p.batchFlushDur
+	if flushDur <= 0 {
+		flushDur = 1 * time.Second
+	}
+	batchChan := make(chan Metric, maxBatch*10)
+	stopChan := make(chan struct{})
+	doneChan := make(chan struct{})
+
+	p.httpBatchChan = batchChan
+	p.httpStopChan = stopChan
+	p.httpDoneChan = doneChan
+
+	go func() {
+		defer close(doneChan)
+
+		ticker := time.NewTicker(flushDur)
+		defer ticker.Stop()
+
+		var batch []Metric
+
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			toSend := batch
+			batch = nil
+			p.sendHTTPBatch(client, url, mode, toSend)
+		}
+
+		for {
+			select {
+			case m, ok := <-batchChan:
+				if !ok {
+					flush()
+					return
+				}
+				batch = append(batch, m)
+				if len(batch) >= maxBatch {
+					flush()
+				}
+			case <-ticker.C:
+				flush()
+			case <-stopChan:
+				for {
+					select {
+					case m := <-batchChan:
+						batch = append(batch, m)
+						if len(batch) >= maxBatch {
+							flush()
+						}
+					default:
+						flush()
+						return
+					}
+				}
+			}
+		}
+	}()
+}
+
+func (p *MetricProducer) stopHTTPBatcherLocked() {
+	if p.httpStopChan == nil {
+		return
+	}
+	stopChan := p.httpStopChan
+	doneChan := p.httpDoneChan
+	p.httpStopChan = nil
+	p.httpDoneChan = nil
+	p.httpBatchChan = nil
+
+	close(stopChan)
+	<-doneChan
+}
+
 // UpdateConfig dynamically updates the output endpoints if relevant configuration changed.
 func (p *MetricProducer) UpdateConfig(newConfig *Config) {
 	p.mu.Lock()
@@ -221,9 +395,11 @@ func (p *MetricProducer) UpdateConfig(newConfig *Config) {
 		p.config.Conf.KafkaTopic != newConfig.Conf.KafkaTopic ||
 		p.config.Conf.KafkaTimeout != newConfig.Conf.KafkaTimeout
 
-	// Check if HTTP endpoint or mode changed
+	// Check if HTTP endpoint, mode, batch size, or flush timer changed
 	httpChanged := p.config.Conf.HttpEndpoint != newConfig.Conf.HttpEndpoint ||
 		p.config.Conf.RbHttpMode != newConfig.Conf.RbHttpMode ||
+		p.config.Conf.RbHttpMaxMessages != newConfig.Conf.RbHttpMaxMessages ||
+		p.config.Conf.RbHttpFlushTimer != newConfig.Conf.RbHttpFlushTimer ||
 		p.config.Conf.HttpInsecure != newConfig.Conf.HttpInsecure ||
 		p.config.Conf.HttpMaxTotalConnections != newConfig.Conf.HttpMaxTotalConnections ||
 		p.config.Conf.HttpTimeout != newConfig.Conf.HttpTimeout ||
@@ -260,6 +436,14 @@ func (p *MetricProducer) UpdateConfig(newConfig *Config) {
 	}
 
 	if httpChanged {
+		p.stopHTTPBatcherLocked()
+
+		if newConfig.Conf.RbHttpFlushTimer > 0 {
+			p.batchFlushDur = time.Duration(newConfig.Conf.RbHttpFlushTimer) * time.Second
+		} else {
+			p.batchFlushDur = 1 * time.Second
+		}
+
 		p.httpClient = nil
 		p.httpURL = newConfig.Conf.HttpEndpoint
 		p.httpMode = newConfig.Conf.RbHttpMode
@@ -296,6 +480,9 @@ func (p *MetricProducer) UpdateConfig(newConfig *Config) {
 				Transport: tr,
 				Timeout:   time.Duration(timeout) * time.Second,
 			}
+			if newConfig.Conf.RbHttpMaxMessages > 1 {
+				p.startHTTPBatcher(p.httpClient, p.httpURL, p.httpMode, newConfig.Conf.RbHttpMaxMessages)
+			}
 			LogMsg(LogInfo, "HTTP client updated: endpoint=%s, mode=%s", p.httpURL, p.httpMode)
 		}
 	}
@@ -306,7 +493,11 @@ func (p *MetricProducer) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.stopHTTPBatcherLocked()
+	p.httpClient = nil
+
 	if p.kafkaWriter != nil {
 		_ = p.kafkaWriter.Close()
+		p.kafkaWriter = nil
 	}
 }
