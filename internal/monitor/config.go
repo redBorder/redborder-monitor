@@ -62,6 +62,7 @@ type Sensor struct {
 	Timeout           int                    `json:"timeout"`
 	SensorName        string                 `json:"sensor_name"`
 	SensorIP          string                 `json:"sensor_ip"`
+	SensorMoid        string                 `json:"sensor_moid"`
 	SnmpVersion       string                 `json:"snmp_version"`
 	Community         string                 `json:"community"`
 	SnmpUsername      string                 `json:"snmp_username"`
