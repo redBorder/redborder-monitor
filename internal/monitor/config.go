@@ -28,6 +28,7 @@ type Conf struct {
 	HttpVerbose             int                    `json:"http_verbose"`
 	HttpInsecure            int                    `json:"http_insecure"`
 	RbHttpMaxMessages       int                    `json:"rb_http_max_messages"`
+	RbHttpFlushTimer        int                    `json:"rb_http_flush_timer"`
 	RbHttpMode              string                 `json:"rb_http_mode"`
 	IpcSocketPath           string                 `json:"ipc_socket_path"`
 	Enrichment              map[string]interface{} `json:"enrichment"`
@@ -62,6 +63,7 @@ type Sensor struct {
 	Timeout           int                    `json:"timeout"`
 	SensorName        string                 `json:"sensor_name"`
 	SensorIP          string                 `json:"sensor_ip"`
+	SensorMoid        string                 `json:"sensor_moid"`
 	SnmpVersion       string                 `json:"snmp_version"`
 	Community         string                 `json:"community"`
 	SnmpUsername      string                 `json:"snmp_username"`
@@ -128,6 +130,8 @@ func (c *Conf) UnmarshalJSON(data []byte) error {
 		HttpVerbose             json.RawMessage `json:"http_verbose"`
 		HttpInsecure            json.RawMessage `json:"http_insecure"`
 		RbHttpMaxMessages       json.RawMessage `json:"rb_http_max_messages"`
+		RbHttpFlushTimer        json.RawMessage `json:"rb_http_flush_timer"`
+		RbHttpFlushInterval     json.RawMessage `json:"rb_http_flush_interval"`
 	}
 
 	if err := json.Unmarshal(data, &temp); err != nil {
@@ -197,6 +201,14 @@ func (c *Conf) UnmarshalJSON(data []byte) error {
 	}
 	if err := assign(temp.RbHttpMaxMessages, &c.RbHttpMaxMessages); err != nil {
 		return err
+	}
+	if err := assign(temp.RbHttpFlushTimer, &c.RbHttpFlushTimer); err != nil {
+		return err
+	}
+	if len(temp.RbHttpFlushTimer) == 0 && len(temp.RbHttpFlushInterval) > 0 {
+		if err := assign(temp.RbHttpFlushInterval, &c.RbHttpFlushTimer); err != nil {
+			return err
+		}
 	}
 
 	return nil
