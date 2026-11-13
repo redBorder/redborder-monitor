@@ -1175,10 +1175,10 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 
 	tr := &http.Transport{
 		TLSClientConfig:     tlsConfig,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives: true,
 	}
+
+	defer tr.CloseIdleConnections()
 
 	if proxyStr != "" {
 		if pURL, err := url.Parse(proxyStr); err == nil {
