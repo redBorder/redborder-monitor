@@ -951,6 +951,14 @@ func IpmiPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 
 // 7. HTTP / HTTP Agent Plugin
 // Performs native HTTP/HTTPS queries and extracts status codes, response times, or bodies.
+func isLegacyEncrypted(block *pem.Block) bool {
+	if block == nil {
+		_, hasDEK := block.Headers["DEK-Info"]
+		return hasDEK || block.Headers["Proc-Type"] == "4,ENCRYPTED"
+	}
+	return false
+}
+
 func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error) {
 	rawURL := getStringParam(m.Params, "url", "")
 	if rawURL == "" {
@@ -1111,48 +1119,22 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 				return "0", fmt.Errorf("failed to parse PKCS#8 SSL key '%s': %w", sslKey, err)
 			}
 
-    case "RSA PRIVATE KEY":
-			if x509.IsEncryptedPEMBlock(block) {
-				if sslKeyPass == "" {
-					return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
-				}
-
-				decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
-				if err != nil {
-					return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
-				}
-
-				privateKey, err = x509.ParsePKCS1PrivateKey(decryptedKey)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
-				}
-			} else {
-				privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
-				}
+    case "RSA PRIVATE KEY", "EC PRIVATE KEY":
+			if isLegacyEncrypted(block) {
+				return "0", fmt.Errorf(
+					"SSL key '%s' uses legacy PEM encryption (RFC 1423), which is insecure and unsupported; "+
+						"convert it to encrypted PKCS#8, e.g.: openssl pkcs8 -topk8 -in key.pem -out key-pkcs8.pem",
+					sslKey)
 			}
 
-    case "EC PRIVATE KEY":
-			if x509.IsEncryptedPEMBlock(block) {
-				if sslKeyPass == "" {
-					return "0", fmt.Errorf("SSL private key '%s' is encrypted but no password was provided", sslKey)
-				}
-
-				decryptedKey, err := x509.DecryptPEMBlock(block, []byte(sslKeyPass))
-				if err != nil {
-					return "0", fmt.Errorf("failed to decrypt SSL key '%s': %w", sslKey, err)
-				}
-
-				privateKey, err = x509.ParseECPrivateKey(decryptedKey)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
-				}
+			if block.Type == "RSA PRIVATE KEY" {
+				privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
 			} else {
 				privateKey, err = x509.ParseECPrivateKey(block.Bytes)
-				if err != nil {
-					return "0", fmt.Errorf("failed to parse EC SSL key '%s': %w", sslKey, err)
-				}
+			}
+			
+			if err != nil {
+				return "0", fmt.Errorf("failed to parse RSA SSL key '%s': %w", sslKey, err)
 			}
 
     default:
