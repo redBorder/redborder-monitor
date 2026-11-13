@@ -959,6 +959,20 @@ func isLegacyEncrypted(block *pem.Block) bool {
 	return false
 }
 
+// readBodyLimited reads a max of `limit` bytes. If the body is larger than `limit`,
+// it returns the first `limit` bytes and truncated=true.
+func readBodyLimited(r io.Reader, limit int64) ([]byte, bool, error) {
+	// Leemos limit+1 para poder detectar si había más datos
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return data[:limit], true, nil
+	}
+	return data, false, nil
+}
+
 func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error) {
 	rawURL := getStringParam(m.Params, "url", "")
 	if rawURL == "" {
@@ -1220,7 +1234,12 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	const maxBodyBytes = 1 << 20 // 1 MiB
+	respBody, truncated, err := readBodyLimited(resp.Body, maxBodyBytes)
+
+	if err != nil {
+		return "0", fmt.Errorf("failed to read response body: %w", err)
+	}
 
 	var outputValue string
 	switch metric {
