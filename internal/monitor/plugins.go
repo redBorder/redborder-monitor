@@ -1247,7 +1247,11 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 		latencyMs := float64(duration) / float64(time.Millisecond)
 		outputValue = fmt.Sprintf("%.2f", latencyMs)
 	case "body":
-		outputValue = string(respBody)
+		if truncated {
+			outputValue = string(respBody) + "\n[TRUNCATED]"
+		}	else {
+			outputValue = string(respBody)
+		}
 	case "json":
 		respHeaders := make(map[string]string)
 		for k, v := range resp.Header {
@@ -1258,6 +1262,7 @@ func HttpPlugin(ctx context.Context, ss *SafeSensor, m *Monitor) (string, error)
 			"message": resp.Status,
 			"headers": respHeaders,
 			"body":    string(respBody),
+			"truncated": truncated,
 		}
 		if data, err := json.Marshal(jsonRes); err == nil {
 			outputValue = string(data)
